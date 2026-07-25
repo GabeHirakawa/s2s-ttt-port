@@ -39,7 +39,7 @@
 import { plugin } from "@s2script/sdk/plugin";
 import { Server } from "@s2script/sdk/server";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
-import { GameState } from "./core/enums";
+import { GameState, Team } from "./core/enums";
 import { EventBus, Priority } from "./core/bus";
 import type { TttEvents } from "./core/events";
 import { registerCvars, refresh, cfg } from "./core/cvars";
@@ -58,9 +58,10 @@ import { invalidatePawnCache, onDamage, onDeathPre, onPlayerHurt, onSpawn } from
 import { clearBodies, precacheBodyModels } from "./cs2/bodies";
 import { initInteract, resetInteract, tickInteract } from "./cs2/interact";
 import { resetSpoof, tickSpoof } from "./cs2/spoof";
+import { installFeedback } from "./cs2/feedback";
 import {
-  handleChat, installBombSuppressor, installHandlers, onItemPurchase, removeBuyZones,
-  tickHandlers, unmuteAll,
+  handleChat, installBombSuppressor, installHandlers, onItemPurchase, onTeamChange,
+  removeBuyZones, setSelfSpectateHandler, tickHandlers, unmuteAll,
 } from "./cs2/handlers";
 
 import { installKarma } from "./karma/karma";
@@ -150,6 +151,13 @@ export default plugin((ctx) => {
   installSpecialRounds(bus);
   installWeaponFx(bus);
   installHandlers(bus);
+  installFeedback(bus);
+  // Ducking out to spectator mid-round counts as dying — it must not be a way to dodge a Traitor.
+  setSelfSpectateHandler((slot) => {
+    reg.setAlive(slot, false);
+    bus.emit("death", { slot, killer: -1, assister: -1, weapon: "", headshot: false });
+    checkEndConditions();
+  });
 
   // Log lines the round logger owns but that other subsystems' events produce. MONITOR priority so
   // the entry records the role karma may have rewritten, not the one originally dealt.
@@ -213,7 +221,9 @@ export default plugin((ctx) => {
     if (slot >= 0) onSpawn(slot);
   });
 
-  ctx.events.on("player_team", () => {
+  ctx.events.on("player_team", (ev) => {
+    const slot = ev.getPlayerSlot("userid");
+    onTeamChange(slot, ev.getInt("team") as Team);
     // A team change alters who is eligible; re-derive liveness and re-check the round.
     reg.resyncAlive();
     checkEndConditions();

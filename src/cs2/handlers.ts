@@ -21,7 +21,9 @@ import { msg } from "../core/msgs";
 import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
-import { pawnOf, setTakesDamage, switchTeam, tell, tellAll, toSpectator } from "./pawn";
+import { pawnOf, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
+import { revealAsInnocent } from "../game/teams";
+import { colorBody } from "./color";
 import { unspoofAlive } from "./spoof";
 import { game, inProgress, inWarmup } from "../game/game";
 import { roleName } from "../game/roles";
@@ -275,7 +277,10 @@ export function resetAfk(): void {
  * dealt a role. Re-asserted continuously because a respawn resets the flag.
  */
 function updateInvulnerability(): void {
-  const vulnerable = game.state === GameState.InProgress || game.state === GameState.Finished;
+  // Warmup is ordinary CS2 deathmatch — the original's `OutOfRoundCanceler` explicitly skipped it
+  // (`if (RoundUtil.IsWarmup()) return;`), so leave the engine's own rules alone there.
+  const vulnerable =
+    inWarmup() || game.state === GameState.InProgress || game.state === GameState.Finished;
   if (vulnerable === lastVulnerable) return;
   lastVulnerable = vulnerable;
   const active = reg.activeSlots();
@@ -287,7 +292,10 @@ let lastVulnerable = true;
 
 /** Re-apply invulnerability to a single slot (called after a respawn resets the flag). */
 export function refreshInvulnerability(slot: number): void {
-  setTakesDamage(slot, game.state === GameState.InProgress || game.state === GameState.Finished);
+  setTakesDamage(
+    slot,
+    inWarmup() || game.state === GameState.InProgress || game.state === GameState.Finished,
+  );
 }
 
 /** Advance the periodic handlers. Driven by the plugin's one shared frame callback. */
@@ -327,6 +335,45 @@ export function handleChat(slot: number, text: string): HookResultValue | void {
     if (reg.roleOf(other) === RoleId.Traitor) tell(other, line);
   }
   return HookResult.Handled;
+}
+
+/**
+ * Enforce "no joining a live round" — the port of `TeamChangeHandler`.
+ *
+ * The C# hooked the `jointeam` client command and refused it outright while a round was running.
+ * s2script has no client-command hook, so this reacts to the resulting `player_team` event instead:
+ * a player who ends up on a playing team mid-round without having been dealt a role is put straight
+ * back to spectator. Same outcome, one event later.
+ *
+ * A player whose corpse has already been identified is exempt: they are publicly dead, so letting
+ * them move to spectator (or be moved) reveals nothing.
+ */
+export function onTeamChange(slot: number, newTeam: Team): void {
+  if (!inProgress()) return;
+  if (slot < 0 || !reg.isConnected(slot)) return;
+
+  // Joining a playing team mid-round without a role = spawning into a round already in progress.
+  if (newTeam === Team.Terrorist || newTeam === Team.CounterTerrorist) {
+    if (reg.roleOf(slot) === RoleId.None) {
+      toSpectator(slot);
+      tell(slot, msg("LATE_JOIN_SPECTATE"));
+    }
+    return;
+  }
+
+  // Leaving to spectator mid-round while still holding a live role is a way to dodge being killed,
+  // so it counts as a death — the C# dispatched a PlayerDeathEvent for exactly this.
+  if (newTeam === Team.Spectator && reg.isAlive(slot) && reg.roleOf(slot) !== RoleId.None) {
+    onSelfSpectate(slot);
+  }
+}
+
+/** Set by the plugin so a mid-round move to spectator can be reported as a death. */
+let onSelfSpectate: (slot: number) => void = () => undefined;
+
+/** Wire the "went to spectator mid-round" handler. */
+export function setSelfSpectateHandler(fn: (slot: number) => void): void {
+  onSelfSpectate = fn;
 }
 
 /** Register the body-identification announcement and the round-boundary resets. */
@@ -370,14 +417,15 @@ export function installHandlers(bus: EventBus<TttEvents>): void {
       logIdentify(ev.identifier, body.ownerName, role);
 
       // The owner stops reading as alive now that their corpse has been found.
+      // Tint the corpse with the role it turned out to be, so anyone walking past afterwards can
+      // see at a glance that it has been identified and what it was.
+      colorBody(body.ref, role);
+
+      // The owner stops reading as alive now that their corpse has been found, and a non-Traitor
+      // is publicly revealed by the move to CT.
       if (reg.isConnected(body.owner)) {
         unspoofAlive(body.owner);
-        if (role !== RoleId.Traitor) {
-          const p = Player.fromSlot(body.owner);
-          if (p !== null && (p.teamNum ?? Team.None) !== Team.Spectator) {
-            switchTeam(body.owner, Team.CounterTerrorist);
-          }
-        }
+        revealAsInnocent(body.owner);
       }
     },
     { ignoreCanceled: true },
@@ -386,6 +434,7 @@ export function installHandlers(bus: EventBus<TttEvents>): void {
   bus.on(
     "gameState",
     (ev) => {
+      // Force the next tick to re-apply, whichever way the new state lands.
       lastVulnerable = !(ev.state === GameState.InProgress || ev.state === GameState.Finished);
       if (ev.state === GameState.InProgress) {
         resetAfk();

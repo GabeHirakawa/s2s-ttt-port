@@ -26,7 +26,9 @@ import type { TttEvents } from "../core/events";
 import { assignRoles, revealTraitorBuddies, roleName } from "./roles";
 import { clearLog, printLogs } from "./logger";
 import { clearBodies } from "../cs2/bodies";
-import { isPlayingTeam, respawn, setPawnIsAlive, switchTeam, teamOf, tellAll } from "../cs2/pawn";
+import { isPlayingTeam, respawn, setPawnIsAlive, tellAll } from "../cs2/pawn";
+import { resetTeamsToT, revealAllRoles } from "./teams";
+import { setSpoofingEnabled } from "../cs2/spoof";
 
 /** Live round state. A module singleton — there is exactly one round in flight. */
 export const game = {
@@ -153,6 +155,7 @@ function beginRound(): void {
   }
 
   reg.rotateRoles();
+  setSpoofingEnabled(true);
   clearBodies(true);
   clearLog();
   for (let i = 0; i < pool.length; i++) reg.refreshName(pool[i]!);
@@ -263,18 +266,17 @@ export function endGame(winner: RoleId, reason?: string): void {
  * panel reads correctly. `switchTeam` is the non-lethal move — `changeTeam` would kill them.
  */
 function revealRoles(): void {
+  // Stop the alive-spoofer first: it re-asserts "alive" every frame, and would immediately undo
+  // the real liveness written just below.
+  setSpoofingEnabled(false);
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
     const role = reg.roleOf(slot);
     if (role === RoleId.None || role === RoleId.Spectator) continue;
     setPawnIsAlive(slot, reg.isAlive(slot));
-    // Only Innocents are moved, matching the original: Detectives are already CT and Traitors are
-    // left where they are, so the win panel reads correctly without extra team churn.
-    if (role === RoleId.Innocent && teamOf(slot) !== Team.Spectator) {
-      switchTeam(slot, Team.CounterTerrorist);
-    }
   }
+  revealAllRoles();
 }
 
 /**
@@ -309,6 +311,10 @@ export function tickCountdown(dt: number): void {
   countdownAccum = 0;
 
   syncRosterAndAnnounce();
+  // Everyone starts the round on T so team membership gives nothing away; the Detective is moved
+  // to CT when roles are dealt. Done through the countdown rather than once, so a late joiner or a
+  // player revealed last round is still put back before assignment.
+  resetTeamsToT();
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;

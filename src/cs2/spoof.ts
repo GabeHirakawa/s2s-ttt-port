@@ -49,7 +49,7 @@ export function spoofing(slot: number): boolean {
  * no-op (one comparison) while nobody is spoofed, which is most of a round's first minute.
  */
 export function tickSpoof(): void {
-  if (spoofed.length === 0) return;
+  if (spoofed.length === 0 || !spoofingEnabled) return;
 
   for (let i = spoofed.length - 1; i >= 0; i--) {
     const slot = spoofed[i]!;
@@ -62,8 +62,23 @@ export function tickSpoof(): void {
   }
 }
 
+/**
+ * Whether the illusion is being maintained at all.
+ *
+ * Turned off the moment a round ends: `revealRoles` writes each player's REAL liveness at that
+ * point, and a spoofer still running would overwrite it on the next frame and keep the dead
+ * reading as alive through the whole end-of-round screen.
+ */
+let spoofingEnabled = true;
+
+/** Stop maintaining the illusion (round end) or resume it (round start). */
+export function setSpoofingEnabled(on: boolean): void {
+  spoofingEnabled = on;
+}
+
 /** Clear every spoof (round boundary / map change). */
 export function resetSpoof(): void {
   for (let i = 0; i < spoofed.length; i++) isSpoofed[spoofed[i]!] = 0;
   spoofed.length = 0;
+  spoofingEnabled = true;
 }

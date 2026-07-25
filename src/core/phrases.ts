@@ -47,6 +47,8 @@ export const PHRASES: Readonly<Record<string, string>> = {
   DNA_PREFIX: "{darkblue}D{blue}N{lightblue}A{grey} | {grey}",
   AFK_WARNING: "%PREFIX%You will be moved to spectators in {yellow}{0} second%s%{grey} for being AFK.",
   AFK_MOVED: "%PREFIX%You were moved to spectators for being AFK.",
+  LATE_JOIN_SPECTATE:
+    "%PREFIX%A round is already in progress — you will join at the start of the next one.",
   DEAD_MUTE_REMINDER: "%PREFIX%You are dead and cannot be heard.",
 
   // ── shop ──────────────────────────────────────────────────────────────────

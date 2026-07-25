@@ -21,7 +21,7 @@ import { Events } from "@s2script/sdk/events";
 import type { GameEvent } from "@s2script/sdk/events";
 import type { DamageInfo } from "@s2script/sdk/damage";
 import { Server } from "@s2script/sdk/server";
-import { RoleId } from "../core/enums";
+import { MAX_SLOTS, RoleId } from "../core/enums";
 import { msg } from "../core/msgs";
 import type { EventBus } from "../core/bus";
 import { sharedDamage, type TttEvents } from "../core/events";
@@ -31,6 +31,7 @@ import { roleName } from "../game/roles";
 import { logDamage, logDeath } from "../game/logger";
 import { spawnBody } from "./bodies";
 import { setHealth, tell } from "./pawn";
+import { hidePawn, resetPawnColor } from "./color";
 import { spoofAlive, unspoofAlive } from "./spoof";
 import { refreshInvulnerability } from "./handlers";
 import { weaponClass, type HeldWeapon } from "./inventory";
@@ -55,6 +56,9 @@ function slotOfPawn(entityIndex: number): number {
  * invalidated wholesale on spawn/death/round change.
  */
 const pawnToSlot = new Map<number, number>();
+
+/** Server time at which the damage PRE-hook last handled a hit on each victim. */
+const preHookHandledAt = new Float64Array(MAX_SLOTS).fill(-1);
 
 /** Diagnostic counters, surfaced by `ttt status`. */
 export const damageDiag = {
@@ -115,10 +119,12 @@ export function onDamage(bus: EventBus<TttEvents>, info: DamageInfo): HookResult
 
   if (ev.canceled) {
     damageDiag.canceled++;
+    preHookHandledAt[victim] = Server.gameTime;
     info.damage = 0;
     return HookResult.Handled;
   }
   damageDiag.applied++;
+  preHookHandledAt[victim] = Server.gameTime;
   if (ev.damage !== info.damage) info.damage = ev.damage;
 
   if (inProgress() && attacker >= 0 && attacker !== victim && ev.damage > 0) {
@@ -196,8 +202,10 @@ function handleDeath(
   );
 
   reg.setAlive(victim, false);
-  // Keep the victim reading as alive on every other client's scoreboard until their body is found.
+  // Keep the victim reading as alive on every other client's scoreboard until their body is found,
+  // and hide the now-dead pawn so it is not left standing as a second, undiscoverable body.
   spoofAlive(victim);
+  hidePawn(victim);
 
   if (body !== null) {
     const created = bus.emit("bodyCreate", { body, canceled: false });
@@ -233,13 +241,19 @@ function handleDeath(
  * this path stands down so nothing is processed twice.
  */
 export function onPlayerHurt(bus: EventBus<TttEvents>, gev: GameEvent): void {
-  if (damageDiag.hits > 0) return; // the real pre-hook is live; leave this alone
-
   const victim = gev.getPlayerSlot("userid");
   if (victim < 0) return;
   const attacker = gev.getPlayerSlot("attacker");
   const dealt = gev.getInt("dmg_health");
   if (dealt <= 0) return;
+
+  // Stand down ONLY for a hit the pre-hook actually handled. A boot-time counter is not safe to
+  // key on: the runtime's synthetic damage self-test drives `onDamage` a few times per session,
+  // which would otherwise disable this fallback permanently and silently kill every damage-driven
+  // item. Per-victim and time-boxed, so the two paths can coexist without double-processing.
+  if (victim >= 0 && victim < MAX_SLOTS) {
+    if (Server.gameTime - preHookHandledAt[victim]! < 0.2) return;
+  }
 
   const remaining = gev.getInt("health");
   const weapon = gev.getString("weapon");
@@ -276,6 +290,8 @@ export function onPlayerHurt(bus: EventBus<TttEvents>, gev: GameEvent): void {
 export function onSpawn(slot: number): void {
   invalidatePawnCache();
   refreshInvulnerability(slot);
+  // A fresh pawn starts opaque — clears the death-hide and any camouflage from last round.
+  resetPawnColor(slot);
   reg.setAlive(slot, reg.computeAlive(slot));
   // A respawn ends any lingering illusion — they really are alive now.
   unspoofAlive(slot);

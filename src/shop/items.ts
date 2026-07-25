@@ -12,7 +12,7 @@
  */
 
 import { RoleId } from "../core/enums";
-import { n, list } from "../core/cvars";
+import { n, list, s as str } from "../core/cvars";
 import { msg } from "../core/msgs";
 import { clearSlot, GearSlot, give } from "../cs2/inventory";
 import { setArmor, tell } from "../cs2/pawn";
@@ -84,7 +84,7 @@ export function registerItems(): void {
   register(
     item("deagle", "SHOP_ITEM_DEAGLE", "SHOP_ITEM_DEAGLE_DESC", RoleId.Detective, "css_ttt_shop_onedeagle_price", (slot) => {
       clearSlot(slot, GearSlot.Pistol);
-      give(slot, "weapon_revolver", 1, 0);
+      give(slot, str("css_ttt_shop_onedeagle_weapon"), 1, 0);
       fx.grantOneShotRevolver(slot);
     }, { limit: 1 }),
   );

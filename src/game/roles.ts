@@ -18,6 +18,8 @@ import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { setArmor, setHealth, tell, toSpectator } from "../cs2/pawn";
 import { give, stripAll } from "../cs2/inventory";
+import { applyRoleTeam } from "./teams";
+import { nextFrame } from "@s2script/sdk/timers";
 
 /** The display name for a role, resolved through the phrase table. */
 export function roleName(role: RoleId): string {
@@ -63,10 +65,18 @@ export function assignRoles(bus: EventBus<TttEvents>, pool: number[]): number {
   return participants;
 }
 
-/** Hand out up to `count` of `role` from `pool`, removing each picked slot. */
+/**
+ * Hand out up to `count` of `role` from `pool`, removing each picked slot.
+ *
+ * Counts SUCCESSFUL deals, not attempts. A pick that gets rewritten to Spectator (a karma timeout)
+ * or vetoed outright must not consume a unit of quota — otherwise the round can go live with zero
+ * Traitors, and `checkEndConditions` then declares an instant Innocent win about a second later.
+ * The C# got this right by construction: its `do { … } while (assigned)` loop re-invoked the role
+ * until the quota was actually filled, and its candidate filter excluded anyone already dealt.
+ */
 function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: number): number {
   let dealt = 0;
-  for (let i = 0; i < count && pool.length > 0; i++) {
+  while (dealt < count && pool.length > 0) {
     const pick = choose(pool, role);
     const slot = pool[pick]!;
     // Swap-and-pop: O(1) removal, and iteration order of the remainder does not matter.
@@ -82,7 +92,18 @@ function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: num
       continue;
     }
     reg.setParticipating(slot, true);
-    applyLoadout(slot, ev.role);
+    // Team first: `switchTeam` may respawn the pawn, which would discard health/armor/weapons
+    // written before it. Only the Detective actually moves here (everyone else is already on T
+    // from the countdown), so at most one player pays the extra frame.
+    if (applyRoleTeam(slot, ev.role)) {
+      const target = slot;
+      const role = ev.role;
+      void nextFrame().then(() => {
+        if (reg.roleOf(target) === role) applyLoadout(target, role);
+      });
+    } else {
+      applyLoadout(slot, ev.role);
+    }
     dealt++;
   }
   return dealt;

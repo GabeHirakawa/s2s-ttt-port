@@ -19,12 +19,13 @@ import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Beam, HintText, type BeamHandle } from "@s2script/cs2";
 import { Server } from "@s2script/sdk/server";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
-import { b, n } from "../core/cvars";
+import { b, n, s } from "../core/cvars";
 import { msg } from "../core/msgs";
 import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, tell } from "../cs2/pawn";
+import { setPawnAlpha } from "../cs2/color";
 import { KNIVES } from "../cs2/inventory";
 import { allBodies, type Body } from "../cs2/bodies";
 import { addBalance } from "./shop";
@@ -167,16 +168,14 @@ export function spendBodyPaint(slot: number, body: Body): boolean {
 }
 
 /**
- * Apply camouflage.
+ * Apply camouflage: drop the pawn's opacity to the configured visibility.
  *
- * KNOWN LIMITATION: the C# item lowered the pawn's render alpha (`SetColor`) to make the player
- * literally harder to see. `m_clrRender` is not exposed through the s2script schema, and the only
- * available visibility primitive (`Transmit.setVisibleTo`) is all-or-nothing per viewer — using it
- * would grant full invisibility, which is a different and much stronger item. So camouflage here
- * only suppresses the name-display reveal (see {@link isCamouflaged}); it does not dim the model.
+ * `m_clrRender` is not in the s2script schema, so this goes through the pawn's `Alpha` entity input
+ * (see `cs2/color.ts`). `css_ttt_shop_camo_visibility` is a 0..1 multiplier, matching the C# config.
  */
 function applyCamo(slot: number): void {
-  void slot;
+  const visibility = n("css_ttt_shop_camo_visibility");
+  setPawnAlpha(slot, Math.round(Math.max(0, Math.min(1, visibility)) * 255));
 }
 
 /** Is this player camouflaged (used by the name-display system)? */
@@ -595,8 +594,16 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
       const victim = ev.slot;
 
       // Taser: no damage, reveals the victim's role to the shooter (and everyone, with Stickers).
+      //
+      // The cancel must survive the `player_hurt` fallback path, where the hit has ALREADY landed:
+      // if it took the victim below zero they are dead before anything can refund it, and the
+      // "scan" would have killed the person it is meant to identify. Force them back to a safe
+      // floor as well as cancelling, so a tase is never lethal.
       if (ev.weapon === "weapon_taser" && hasTaser[attacker] === 1) {
         ev.canceled = true;
+        const pawn = pawnOf(victim);
+        const hp = pawn?.health ?? 0;
+        if (hp <= 0) setHealth(victim, 1);
         const role = roleName(reg.roleOf(victim));
         tell(attacker, msg("TASER_SCANNED", reg.nameOf(victim), role));
         if (hasStickers[attacker] === 1) {
@@ -607,14 +614,20 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
       }
 
       // One-Shot Revolver: an instant kill, or suicide on a teammate.
-      if (hasRevolver[attacker] === 1 && ev.weapon === "weapon_revolver") {
+      //
+      // CS2 reports the weapon as `weapon_deagle` even when the player is holding a revolver — the
+      // C# carried an explicit alias for exactly this, and it matters more here because the live
+      // path is `player_hurt`, whose weapon string comes straight from the engine field.
+      if (hasRevolver[attacker] === 1 && isOneShotWeapon(ev.weapon)) {
         const sameTeam = (reg.roleOf(attacker) === RoleId.Traitor) === (reg.roleOf(victim) === RoleId.Traitor);
         if (sameTeam && !b("css_ttt_shop_onedeagle_ff")) {
+          hasRevolver[attacker] = 0;
           ev.canceled = true;
           tell(attacker, msg("SHOP_ITEM_DEAGLE_HIT_FF"));
           if (b("css_ttt_shop_onedeagle_kill_shooter_on_ff")) setHealth(attacker, 0);
           return;
         }
+        hasRevolver[attacker] = 0; // one shot only, matching the C# RemoveItem on first hit
         ev.damage = 1000;
         tell(victim, msg("SHOP_ITEM_DEAGLE_VICTIM"));
         return;
@@ -651,6 +664,18 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
   eventBus.on("gameState", (ev) => {
     if (ev.state === GameState.Finished) resetEffects();
   }, { ignoreCanceled: true });
+}
+
+/**
+ * Does this weapon string count as the One-Shot Revolver?
+ *
+ * Accepts the configured class and, when that class is the revolver, the `weapon_deagle` the engine
+ * actually reports for it.
+ */
+function isOneShotWeapon(weapon: string): boolean {
+  const cls = s("css_ttt_shop_onedeagle_weapon");
+  if (weapon === cls) return true;
+  return cls === "weapon_revolver" && weapon === "weapon_deagle";
 }
 
 /** Pistol test kept local so `effects` does not need the whole inventory tag table. */
