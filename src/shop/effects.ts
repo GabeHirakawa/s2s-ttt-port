@@ -34,8 +34,13 @@ import {
   give, resolveWeapon, weaponClass, KNIVES, PISTOLS, RIFLES, type HeldWeapon,
 } from "../cs2/inventory";
 import { allBodies, type Body } from "../cs2/bodies";
+// Closes a module cycle (`combat` -> `handlers` -> `effects`). Safe: every edge is a hoisted
+// function called at event time, and nothing in this file is read while a module is still
+// evaluating.
+import { markGadgetKill } from "../cs2/combat";
 import { addBalance } from "./shop";
-import { resetWeaponFx } from "./weaponfx";
+import { poisonShotsLeft } from "./weaponfx";
+import { suppressKarmaOnce } from "../karma/karma";
 import { game, inProgress } from "../game/game";
 import { roleName } from "../game/roles";
 
@@ -93,8 +98,6 @@ const camouflaged = new Uint8Array(MAX_SLOTS);
 const gloveUses = new Int32Array(MAX_SLOTS);
 /** Remaining Body Paint uses. */
 const paintUses = new Int32Array(MAX_SLOTS);
-/** Remaining poisoned shots. */
-const poisonShots = new Int32Array(MAX_SLOTS);
 /** Active compass mode. */
 const compass = new Uint8Array(MAX_SLOTS);
 
@@ -104,12 +107,17 @@ const poisonRemaining = new Int32Array(MAX_SLOTS);
 /** Seconds until the next poison tick. */
 const poisonTimer = new Float32Array(MAX_SLOTS);
 /**
- * 1 when the poison came from a Poison Shot rather than Poison Smoke.
+ * Who applied the poison on this slot, and whether it came from a smoke rather than a shot.
  *
- * Only the Shots path washed the victim's screen (`PoisonShotsListener` called `ColorScreen`;
- * `PoisonSmokeListener` ticked its damage without one), and both sources share one tick loop here.
+ * The source is stored when the poison lands but only READ on the lethal tick — see `tickPoison` —
+ * exactly as `killedWithPoison[player.Id] = shooter` was written there and nowhere else.
+ *
+ * The kind matters twice. Only the Shots path washes the victim's screen (`PoisonShotsListener`
+ * called `ColorScreen`; `PoisonSmokeListener` ticked its damage without one), and only the Smoke
+ * path leaves no corpse at all (`PoisonSmokeListener.OnRagdollSpawn` cancels body creation).
  */
-const poisonFromShots = new Uint8Array(MAX_SLOTS);
+const poisonSource = new Int32Array(MAX_SLOTS).fill(-1);
+const poisonFromSmoke = new Uint8Array(MAX_SLOTS);
 
 /** A placed health/hurt station. */
 interface Station {
@@ -135,6 +143,11 @@ interface Station {
 /** A placed tripwire. */
 interface Tripwire {
   owner: number;
+  /**
+   * Server time the wire was placed — the C# `TripwireInstance.placedAt`. Read by the karma
+   * forgiveness window: an old trap that kills a fellow Traitor is not the owner's fault.
+   */
+  placedAt: number;
   beam: BeamHandle | null;
   ax: number; ay: number; az: number;
   bx: number; by: number; bz: number;
@@ -198,8 +211,9 @@ export function grantCamo(slot: number): void { camouflaged[slot] = 1; applyCamo
 export function grantGloves(slot: number, uses: number): void { gloveUses[slot] = uses; }
 /** Grant Body Paint with `uses` charges. */
 export function grantBodyPaint(slot: number, uses: number): void { paintUses[slot] = uses; }
-/** Grant `count` poisoned shots. */
-export function grantPoisonShots(slot: number, count: number): void { poisonShots[slot] = count; }
+// Poison Shots' counter lives in `weaponfx.ts`: the charge is spent on the trigger pull (which is
+// also what silences the pistol), not on the hit, so the module that hooks `weapon_fire` owns it.
+// This file only READS it, through `poisonShotsLeft`.
 /** Turn on a compass. */
 export function grantCompass(slot: number, mode: CompassMode): void { compass[slot] = mode; }
 /** Does this player have Gloves charges left? */
@@ -322,21 +336,27 @@ export function placeStation(slot: number, increment: number, budget?: number): 
   const at = hit?.endPos ?? pawn.origin;
   if (at === null || at === undefined) return;
 
-  // The prop is spawned effectively unbreakable and torn down by the script instead. The C# tracked
-  // `StationInfo.Health` itself and fired `AcceptInput("Kill")` at zero; letting the ENGINE own
-  // break damage as well would let the two drift — the prop popping while the script still thinks
-  // it is pristine, or sitting there deep-red long after the script wrote it off.
+  // The script owns the station's health the way `StationInfo.Health` did: `shootStation` takes it
+  // down per bullet and fires `AcceptInput("Kill")` at zero.
+  //
+  // The prop is nevertheless spawned with that SAME health rather than an unbreakable one, so the
+  // engine's own break damage stays a second, independent way to destroy it. `shootStation` is
+  // reachable only through `onBulletImpact`, which is wired from plugin.ts's `bullet_impact`
+  // subscription; a station whose only destruction path is that one hook is invulnerable for the
+  // whole round if the hook is ever missing, which is the worse failure by far. The two models
+  // score a bullet slightly differently, so whichever gets there first wins by about one shot —
+  // and a prop the engine broke is reaped by `tickStations`' `isValid()` check.
+  const maxHealth = n("css_ttt_shop_healthstation_station_health");
   const ent = createEntity("prop_physics_override", {
     model: STATION_MODEL,
     targetname: `ttt_station_${slot}`,
-    health: 1_000_000,
+    health: maxHealth,
   });
   // Store the position the prop actually ends up at, so the bullet-impact test and the effect
   // radius agree — the C# used one `AbsOrigin` for both.
   const z = at.z + 8;
   ent?.teleport([at.x, at.y, z], null, [0, 0, 0]);
 
-  const maxHealth = n("css_ttt_shop_healthstation_station_health");
   stations.push({
     ref: ent,
     owner: slot,
@@ -427,7 +447,12 @@ function tickStations(dt: number): void {
         oneSlot[0] = slot;
         pawn.emitSound(SND_STATION_HURT, { recipients: oneSlot, volume: 0.2 });
       }
-      setHealth(slot, hp + amount);
+      const next = hp + amount;
+      // `DamageStation.applyDamage` dispatched a `PlayerDeathEvent.WithKiller(dominantInfo.Owner)
+      // .WithWeapon("[Hurt Station]")` on the tick that would kill. Without it this bare health
+      // write reaches the engine with no attacker and the kill scores as the victim's own suicide.
+      if (!heals && next <= 0) markGadgetKill(slot, st.owner, "[Hurt Station]");
+      setHealth(slot, next);
       st.given += amount < 0 ? -amount : amount;
     }
   }
@@ -602,6 +627,7 @@ export function placeTripwire(slot: number): boolean {
 
   tripwires.push({
     owner: slot,
+    placedAt: Server.gameTime,
     beam,
     ax: start.x, ay: start.y, az: start.z,
     bx: end.x, by: end.y, bz: end.z,
@@ -682,6 +708,9 @@ function detonateTripwire(tw: Tripwire): void {
   const power = n("css_ttt_shop_tripwire_explosion_power");
   const falloff = n("css_ttt_shop_tripwire_falloff_delay");
   const ffMult = n("css_ttt_shop_tripwire_friendlyfire_multiplier");
+  const owner = tw.owner;
+  const forgiveAfter = n("css_ttt_shop_tripwire_friendlyfire_karma_penalty_time");
+  const age = Server.gameTime - tw.placedAt;
   if (tw.beam !== null) Sound.emit(SND_TRIPWIRE_BLAST, { entity: tw.beam.ref });
 
   const active = reg.activeSlots();
@@ -711,9 +740,36 @@ function detonateTripwire(tw: Tripwire): void {
     if (dealt < 1) continue;
     // Emitted before the write, because a lethal `setHealth` slays the pawn this cue plays from.
     pawn.emitSound(SND_TRIPWIRE_BURN);
-    setHealth(slot, (pawn.health ?? 0) - dealt);
+
+    const health = pawn.health ?? 0;
+    if (health - dealt <= 0) {
+      // C# forgives a Traitor killed by a trap that has been sitting there a while — the owner is
+      // long gone and it is not their fault; -1 disables the forgiveness entirely.
+      if (forgiveAfter !== -1 && reg.roleOf(slot) === RoleId.Traitor && age > forgiveAfter) {
+        suppressKarmaOnce(slot);
+      }
+      // `dealTripwireDamage` dispatched `PlayerDeathEvent.WithKiller(instance.owner)
+      // .WithWeapon("[Tripwire]")`. The death itself is already carried by the engine's own
+      // `player_death` (the slay inside `setHealth`), which reports no attacker — this hands that
+      // event the killer and the cause it has no way to know, rather than emitting a second one.
+      markGadgetKill(slot, owner, "[Tripwire]");
+    } else {
+      // C# dispatches a real PlayerDamagedEvent with instance.owner as the attacker, which is what
+      // puts the trap's owner on karma's first-damage record. Fresh payload, NOT the exported
+      // `sharedDamage` singleton — this runs from the tick, not from the damage hook.
+      bus.emit("damage", {
+        slot,
+        attacker: owner,
+        damage: dealt,
+        weapon: "[Tripwire]",
+        canceled: false,
+      });
+    }
+    // C# applies the health change regardless of whether a listener canceled the event it just
+    // dispatched, so `canceled` is deliberately not consulted. A direct health write fires no
+    // `player_hurt`, so the damage listener below cannot double-count this emit either.
+    setHealth(slot, health - dealt);
   }
-  void tw.owner;
 }
 
 /**
@@ -761,17 +817,17 @@ export function tryDefuseTripwire(slot: number, dt: number): boolean {
 
 // ── poison ───────────────────────────────────────────────────────────────────
 /**
- * Apply poison to `victim`. `fromShots` marks the Poison Shots source, which is the only one that
- * washes the victim's screen.
+ * Apply poison to `victim`, credited to `attacker`. `fromSmoke` marks the Poison Smoke source: the
+ * one that does not wash the victim's screen and whose victims leave no corpse behind.
  *
- * NOTE: poison damage is applied by writing health, which the engine attributes to nobody — so a
- * poison kill is not credited to the Traitor who threw the smoke. The C# had the same limitation
- * (it also drove the damage through a direct health write).
+ * The poison damage is a bare health write, which the engine attributes to nobody — `tickPoison`
+ * hands the killer to `markGadgetKill` on the lethal tick so the kill still lands on the poisoner.
  */
-export function applyPoison(victim: number, fromShots = false): void {
+export function applyPoison(victim: number, attacker = -1, fromSmoke = false): void {
   poisonRemaining[victim] = n("css_ttt_shop_poisonsmoke_poison_total_damage");
   poisonTimer[victim] = 0;
-  poisonFromShots[victim] = fromShots ? 1 : 0;
+  poisonSource[victim] = attacker;
+  poisonFromSmoke[victim] = fromSmoke ? 1 : 0;
 }
 
 /**
@@ -826,7 +882,7 @@ function tickPoison(dt: number): void {
     if (otherSlots.length !== 0) {
       pawn.emitSound(SND_POISON_OTHERS, { recipients: otherSlots, volume: 0.2 });
     }
-    if (poisonFromShots[slot] === 1) {
+    if (poisonFromSmoke[slot] === 0) {
       Fade.to(slot, {
         duration: POISON_FADE_DURATION,
         holdTime: POISON_FADE_HOLD,
@@ -835,7 +891,16 @@ function tickPoison(dt: number): void {
       });
     }
 
-    setHealth(slot, (pawn.health ?? 0) - damage);
+    const next = (pawn.health ?? 0) - damage;
+    // Record the source ONLY on the lethal tick, as `killedWithPoison[player.Id] = shooter` does —
+    // stamping it when the poison lands would credit the poisoner for a later kill by someone else.
+    // Smoke victims additionally leave no corpse (`PoisonSmokeListener.OnRagdollSpawn` cancels the
+    // body outright), which is the fourth argument.
+    if (next <= 0) {
+      const smoke = poisonFromSmoke[slot] === 1;
+      markGadgetKill(slot, poisonSource[slot]!, smoke ? "[Poison Smoke]" : "[Poison Shots]", smoke);
+    }
+    setHealth(slot, next);
   }
 }
 
@@ -1002,11 +1067,11 @@ export function resetEffects(): void {
   camouflaged.fill(0);
   gloveUses.fill(0);
   paintUses.fill(0);
-  poisonShots.fill(0);
   compass.fill(0);
   poisonRemaining.fill(0);
   poisonTimer.fill(0);
-  poisonFromShots.fill(0);
+  poisonSource.fill(-1);
+  poisonFromSmoke.fill(0);
   activeC4 = 0;
 
   for (let i = 0; i < stations.length; i++) stations[i]!.ref?.remove();
@@ -1015,8 +1080,17 @@ export function resetEffects(): void {
   tripwires.length = 0;
 }
 
+/**
+ * The TTT bus, kept so the tick-driven effects can dispatch on it. `detonateTripwire` is the one
+ * that needs it: the C# `dealTripwireDamage` dispatches a real `PlayerDamagedEvent` for every
+ * non-lethal hit, which is what puts the trap's owner on karma's first-damage record.
+ */
+let bus: EventBus<TttEvents>;
+
 /** Register the damage-driven item behaviours. */
 export function installEffects(eventBus: EventBus<TttEvents>): void {
+  bus = eventBus;
+
   eventBus.on(
     "damage",
     (ev) => {
@@ -1073,13 +1147,13 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
         return;
       }
 
-      // Poison Shots: a pistol hit applies poison and consumes a charge. This is the source that
+      // Poison Shots: a pistol hit applies poison. The charge was already spent on FIRE (see
+      // `onWeaponFire` in weaponfx.ts) — the C# `OnDamage` only READS the counter, which is why the
+      // shot that spends the last charge lands without poisoning. This is also the source that
       // flashes the victim's screen; Poison Smoke (in `weaponfx.ts`) is the silent one.
-      if (poisonShots[attacker]! > 0 && ev.weapon.startsWith("weapon_") && isPistol(ev.weapon)) {
-        poisonShots[attacker] = poisonShots[attacker]! - 1;
-        applyPoison(victim, true);
+      if (poisonShotsLeft(attacker) > 0 && isPistol(ev.weapon)) {
+        applyPoison(victim, attacker, false);
         tell(attacker, msg("SHOP_ITEM_POISON_HIT", reg.nameOf(victim)));
-        if (poisonShots[attacker] === 0) tell(attacker, msg("SHOP_ITEM_POISON_OUT"));
       }
     },
     { priority: Priority.HIGH },

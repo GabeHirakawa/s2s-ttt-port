@@ -111,6 +111,7 @@ const SPECS: readonly Spec[] = [
   // ── shop items ──────────────────────────────────────────────────────────────
   S("css_ttt_shop_armor_price", "int", 75, "Price of the Armor item", 0, 10000),
   S("css_ttt_shop_armor_amount", "int", 100, "Armor granted by the Armor item", 0, 1000),
+  S("css_ttt_shop_armor_helmet", "bool", true, "Armor item also grants a helmet"),
   S("css_ttt_shop_taser_price", "int", 110, "Price of the Taser item", 0, 10000),
   S("css_ttt_shop_taser_weapon", "string", "weapon_taser", "Weapon entity for the Taser"),
   S("css_ttt_shop_healthshot_price", "int", 40, "Price of the Healthshot", 0, 10000),
@@ -141,6 +142,9 @@ const SPECS: readonly Spec[] = [
   S("css_ttt_shop_healthstation_use_sound", "string", "sounds/buttons/blip1", "Station use sound"),
   S("css_ttt_shop_damagestation_price", "int", 65, "Price of the Hurt Station (Traitor)", 0, 10000),
   S("css_ttt_shop_damagestation_increments", "int", -25, "Damage applied per hurt-station tick", -1000, 1000),
+  // `DamageStationConfig.TotalHealthGiven` is -3000; this is its magnitude, because the hurt
+  // station's budget is spent in damage and the sign already lives in the increment above.
+  S("css_ttt_shop_damagestation_total_damage", "int", 3000, "Total damage a Hurt Station deals before depleting (0 = infinite)", 0, 100000),
   S("css_ttt_shop_damagestation_max_purchases", "int", 3, "Hurt Stations purchasable per round", 0, 100),
   S("css_ttt_shop_c4_price", "int", 130, "Price of the C4 (Traitor)", 0, 10000),
   S("css_ttt_shop_c4_weapon", "string", "weapon_c4", "Weapon entity for the C4"),
@@ -188,13 +192,17 @@ const SPECS: readonly Spec[] = [
   S("css_ttt_shop_compass_length", "int", 64, "Compass strip width in characters", 8, 256),
   S("css_ttt_shop_tripwire_price", "int", 45, "Price of the Tripwire (Traitor)", 0, 10000),
   S("css_ttt_shop_tripwire_explosion_power", "int", 1000, "Tripwire explosion damage", 0, 100000),
-  S("css_ttt_shop_tripwire_falloff_delay", "float", 0.015, "Tripwire damage falloff rate", 0, 10),
+  // 0.02 is `TripwireConfig.FalloffDelay`; the exponential falloff curve is calibrated on it.
+  S("css_ttt_shop_tripwire_falloff_delay", "float", 0.02, "Tripwire damage falloff rate", 0, 10),
   S("css_ttt_shop_tripwire_friendlyfire_multiplier", "float", 0.5, "Tripwire friendly-fire multiplier", 0, 10),
   S("css_ttt_shop_tripwire_friendlyfire_triggers", "bool", true, "Whether teammates trigger a Tripwire"),
   S("css_ttt_shop_tripwire_friendlyfire_karma_penalty_time", "int", 15, "Seconds a Tripwire teamkill costs karma (-1 = always)", -1, 3600),
   S("css_ttt_shop_tripwire_max_distance_squared", "float", 50000, "Max Tripwire placement distance squared", 0, 10000000),
   S("css_ttt_shop_tripwire_initiation_time", "float", 2, "Seconds before a Tripwire arms", 0, 60),
-  S("css_ttt_shop_tripwire_size_squared", "float", 10, "Tripwire hit-detection radius squared", 0, 100000),
+  // `TripwireConfig.TripwireSizeSquared`. SQUARED units: 500 is a ~22u radius. The 10 this used to
+  // default to is 3.2u, which is smaller than a player and left both the walk-through trigger and
+  // the shoot-it trigger unhittable in practice.
+  S("css_ttt_shop_tripwire_size_squared", "float", 500, "Tripwire hit-detection radius squared", 0, 100000),
   S("css_ttt_shop_tripwire_thickness", "float", 0.5, "Tripwire beam thickness", 0.1, 10),
   S("css_ttt_shop_tripwire_defuse_time", "float", 6, "Seconds to fully defuse a Tripwire", 0.1, 60),
   S("css_ttt_shop_tripwire_defuse_rate", "float", 0.5, "Seconds between defuse ticks", 0.05, 10),

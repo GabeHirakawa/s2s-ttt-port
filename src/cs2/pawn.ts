@@ -10,7 +10,7 @@
 
 import { Player, type Pawn } from "@s2script/cs2";
 import { Chat } from "@s2script/sdk/chat";
-import { Team } from "../core/enums";
+import { MAX_SLOTS, Team } from "../core/enums";
 
 /** The pawn for `slot`, or null when disconnected/dead/mid-respawn. */
 export function pawnOf(slot: number): Pawn | null {
@@ -37,6 +37,43 @@ export function setHealth(slot: number, value: number): void {
   }
   pawn.health = value;
   if (value > (pawn.maxHealth ?? 100)) pawn.maxHealth = value;
+}
+
+/**
+ * Pending kill attribution: `pendingKiller[victim]` is the slot to credit with that victim's next
+ * death when the engine reports none.
+ *
+ * `setHealth(slot, <= 0)` above goes through `pawn.slay()`, and the `player_death` it produces names
+ * the victim as their own attacker. So a trap, a poison tick or a hurt station scores as a
+ * suicide: the corpse records no killer, the DNA Scanner reports "no DNA was found", and karma sees
+ * nobody to hold responsible — the entire risk side of those items disappears. The C# sidestepped it
+ * by dispatching its own `PlayerDeathEvent().WithKiller(owner)` rather than letting the engine's
+ * event stand.
+ *
+ * The table lives HERE rather than in `cs2/combat.ts` so that `shop/effects.ts` can record an
+ * attribution without importing combat.ts, which would close a cycle back through `cs2/handlers.ts`.
+ * combat.ts owns the richer table (`markGadgetKill`, which also carries the weapon name and the
+ * Poison-Smoke no-corpse flag) and consumes both in its `player_death` pre-hook, preferring the
+ * richer one; this is the killer-only fallback for callers that cannot reach it.
+ */
+const pendingKiller = new Int32Array(MAX_SLOTS).fill(-1);
+
+/** Credit `killer` with `victim`'s next death. Consumed by the death hook. */
+export function attributeNextDeath(victim: number, killer: number): void {
+  if (victim >= 0 && victim < MAX_SLOTS) pendingKiller[victim] = killer;
+}
+
+/** Read-and-clear the pending attribution for `victim` (-1 when there is none). */
+export function takeAttributedKiller(victim: number): number {
+  if (victim < 0 || victim >= MAX_SLOTS) return -1;
+  const killer = pendingKiller[victim]!;
+  pendingKiller[victim] = -1;
+  return killer;
+}
+
+/** Drop every pending attribution (round boundary / respawn). */
+export function clearAttributedKills(): void {
+  pendingKiller.fill(-1);
 }
 
 /** Set armor value (and the controller mirror the scoreboard reads). */

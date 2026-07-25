@@ -28,6 +28,7 @@ import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, tell } from "../cs2/pawn";
+import { markGadgetKill } from "../cs2/combat";
 import { PISTOLS } from "../cs2/inventory";
 import type { Body } from "../cs2/bodies";
 import { ownsDnaScanner } from "./effects";
@@ -200,8 +201,10 @@ export function onWeaponFire(slot: number, weapon: string): void {
  */
 interface Cloud {
   /**
-   * Who threw it. Carried for attribution only — the damage is a direct health write, which the
-   * engine credits to nobody. The C# had the same limitation for gadget damage.
+   * Who threw it. The damage is a direct health write, which reaches the engine with no attacker,
+   * so a lethal tick hands the thrower to `markGadgetKill` — the C# dispatched its own
+   * `PlayerDeathEvent(...).WithKiller(effect.Attacker).WithWeapon("[Poison Smoke]")` for the same
+   * reason.
    */
   owner: number;
   x: number;
@@ -258,6 +261,8 @@ const fragX = new Float32Array(MAX_FRAGMENTS);
 const fragY = new Float32Array(MAX_FRAGMENTS);
 const fragZ = new Float32Array(MAX_FRAGMENTS);
 const fragFuse = new Float32Array(MAX_FRAGMENTS);
+/** Who threw the HE each fragment came out of — the C# handed the thrower's pawn to every one. */
+const fragOwner = new Int32Array(MAX_FRAGMENTS).fill(-1);
 let fragCount = 0;
 
 /** Reset every per-round charge and every live world effect. */
@@ -425,17 +430,37 @@ export function onHeDetonate(thrower: number, x: number, y: number, z: number): 
     let fy = y + dy * settle;
     if (settle > 0) {
       const wall = Trace.line(from, new Vector(fx, fy, z + 8), { mask: TraceMask.Grenade });
-      if (wall.didHit) {
+      if (wall.startSolid) {
+        // The blast plane is itself inside geometry — an HE that went off flush against a wall or
+        // in a stair nose. `endPos` is then ~= `from`, so the usual pull-back would park the
+        // fragment 8u BEHIND the epicentre, inside whatever the grenade was resting on. Leave it
+        // on the epicentre; the occlusion test below is what keeps it honest either way.
+        fx = x;
+        fy = y;
+      } else if (wall.didHit) {
         // Pull back off the surface so the fragment sits in the room, not inside the brush.
         fx = wall.endPos.x - dx * 8;
         fy = wall.endPos.y - dy * 8;
       }
     }
 
+    // Drop the fragment onto whatever it landed on. Without this every fragment is stored on the
+    // HE's detonation PLANE, which on a slope, a stair or a raised lip is inside the floor — and a
+    // detonation trace that starts in solid is a trace that can tell you nothing about cover.
+    // Reproduces the settle the ballistic model above only describes.
+    let fz = z;
+    const floor = Trace.line(
+      new Vector(fx, fy, z + 32),
+      new Vector(fx, fy, z - 256),
+      { mask: TraceMask.WorldOnly },
+    );
+    if (floor.didHit && !floor.startSolid) fz = floor.endPos.z;
+
     fragX[fragCount] = fx;
     fragY[fragCount] = fy;
-    fragZ[fragCount] = z;
+    fragZ[fragCount] = fz;
     fragFuse[fragCount] = FRAG_FUSE + i * FRAG_STAGGER;
+    fragOwner[fragCount] = thrower;
     fragCount++;
   }
 }
@@ -494,6 +519,12 @@ function tickClouds(dt: number): void {
       const hp = pawn.health ?? 0;
       if (hp - perTick <= 0) {
         // A lethal tick kills outright and, in the C#, does NOT charge the shared pool.
+        //
+        // `suppressBody` is the Poison Smoke rule and only Poison Smoke's: `OnRagdollSpawn` cancels
+        // the corpse of anyone in `killedWithPoison`, so a smoke victim leaves nothing to find,
+        // identify or scan. The thrower is recorded here rather than when the cloud popped, because
+        // the C# adds to `killedWithPoison` on the killing tick, not on entry to the cloud.
+        markGadgetKill(slot, cl.owner, "[Poison Smoke]", true);
         setHealth(slot, 0);
         continue;
       }
@@ -513,18 +544,25 @@ function tickFragments(dt: number): void {
       fragFuse[i] = fuse;
       continue;
     }
-    detonateFragment(fragX[i]!, fragY[i]!, fragZ[i]!, active);
+    detonateFragment(fragX[i]!, fragY[i]!, fragZ[i]!, fragOwner[i]!, active);
     // Swap-remove: fragment order carries no meaning and this keeps the drain allocation-free.
     fragCount--;
     fragX[i] = fragX[fragCount]!;
     fragY[i] = fragY[fragCount]!;
     fragZ[i] = fragZ[fragCount]!;
     fragFuse[i] = fragFuse[fragCount]!;
+    fragOwner[i] = fragOwner[fragCount]!;
   }
 }
 
 /** One fragment goes off: falloff damage to everyone it can actually see. */
-function detonateFragment(fx: number, fy: number, fz: number, active: readonly number[]): void {
+function detonateFragment(
+  fx: number,
+  fy: number,
+  fz: number,
+  owner: number,
+  active: readonly number[],
+): void {
   const from = new Vector(fx, fy, fz + 8);
 
   for (let i = 0; i < active.length; i++) {
@@ -546,10 +584,19 @@ function detonateFragment(fx: number, fy: number, fz: number, active: readonly n
     // radius sweep. Chest height, world geometry only, so a teammate standing in the way does not
     // shield you the way a wall does.
     const los = Trace.line(from, new Vector(o.x, o.y, o.z + 36), { mask: TraceMask.WorldOnly });
-    // A trace that STARTS in solid tells us nothing (the fragment settled half inside a brush), so
-    // treat it as clear rather than silently deleting the fragment for everyone.
-    if (los.didHit && !los.startSolid) continue;
+    // FAIL CLOSED. A trace that starts in solid means the fragment is buried in geometry, and
+    // "this trace can tell us nothing" must never be read as "line of sight is clear" — that is
+    // through-wall damage at the full 250u radius with no occlusion test at all, in exactly the
+    // case where a wall is most likely to be in the way. The settle trace in `onHeDetonate` is what
+    // keeps this from costing anything in normal play; when it still happens, one fragment of eight
+    // going quiet is the cheap side of the trade.
+    if (los.didHit || los.startSolid) continue;
 
-    setHealth(slot, (pawn.health ?? 0) - damage);
+    const next = (pawn.health ?? 0) - damage;
+    // The C# fragments were real `CHEGrenadeProjectile`s built with the thrower's pawn handle, so
+    // the engine credited their kills. A direct health write credits nobody — mark it on the lethal
+    // hit only, the way `markGadgetKill` is specified.
+    if (next <= 0) markGadgetKill(slot, owner, "[Cluster Grenade]");
+    setHealth(slot, next);
   }
 }

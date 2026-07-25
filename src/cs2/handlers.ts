@@ -23,7 +23,7 @@ import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setArmor, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
 import { weaponClass, type HeldWeapon } from "./inventory";
-import { revealAsInnocent } from "../game/teams";
+import { enforceRoundTeam, revealAsInnocent } from "../game/teams";
 import { colorBody } from "./color";
 import { unspoofAlive } from "./spoof";
 import { game, inProgress, inWarmup } from "../game/game";
@@ -162,9 +162,13 @@ export function onItemPurchase(slot: number, weapon: string): boolean {
   // helmet flag is left alone — there is no way to clear it, and it grants nothing on its own.
   if (weapon === "item_assaultsuit" || weapon === "item_kevlar") setArmor(slot, 0);
 
-  // The C#'s two extra "clear the whole gear slot" cases are deliberately not ported: the m4a1 shop
-  // item already clears slots 0,1 (`css_ttt_shop_m4a1_clear_slots`) and the deagle item already
-  // clears the pistol slot, so re-clearing here would only destroy the player's own loadout.
+  // The C#'s two extra "clear the whole gear slot" cases are deliberately not ported, for two
+  // different reasons. `weapon_m4a1_silencer -> RemoveWeaponInSlot(0)` is redundant: the m4a1 shop
+  // item this purchase routes to already clears slots 0,1 (`css_ttt_shop_m4a1_clear_slots`).
+  // `weapon_revolver -> RemoveWeaponInSlot(1)` is NOT — the second case keys on weapon_revolver, and
+  // only weapon_deagle has a shop alias, so it never reaches the deagle item's own pistol-slot
+  // clear. It is dropped because destroying the player's loadout pistol on a buy that grants them
+  // nothing is a C# bug, not because anything else covers it.
 
   const itemId = BUY_ALIASES[weapon];
   if (itemId === undefined) return false;
@@ -421,33 +425,47 @@ export function handleChat(slot: number, text: string): HookResultValue | void {
 }
 
 /**
- * Enforce "no joining a live round" — the port of `TeamChangeHandler`.
+ * Enforce "no joining a live round" and "no switching sides once you are in one" — the port of
+ * `TeamChangeHandler`.
  *
  * The C# hooked the `jointeam` client command and refused it outright while a round was running.
  * s2script has no client-command hook, so this reacts to the resulting `player_team` event instead:
  * a player who ends up on a playing team mid-round without having been dealt a role is put straight
- * back to spectator. Same outcome, one event later.
+ * back to spectator, and a player who already holds one is put back on the team their role entitles
+ * them to. Same outcome, one event later.
  *
  * A player whose corpse has already been identified is exempt: they are publicly dead, so letting
- * them move to spectator (or be moved) reveals nothing.
+ * them move to spectator (or be moved) reveals nothing. That exemption lives in `enforceRoundTeam`.
  */
-export function onTeamChange(slot: number, newTeam: Team): void {
+export function onTeamChange(slot: number, newTeam: Team, disconnecting = false): void {
   if (!inProgress()) return;
   if (slot < 0 || !reg.isConnected(slot)) return;
+  // A leaving player fires `player_team` for team None on the way out: there is nobody left to pin,
+  // and bouncing a controller the engine is already tearing down achieves nothing.
+  if (disconnecting) return;
 
   // Joining a playing team mid-round without a role = spawning into a round already in progress.
   if (newTeam === Team.Terrorist || newTeam === Team.CounterTerrorist) {
     if (reg.roleOf(slot) === RoleId.None) {
       toSpectator(slot);
       tell(slot, msg("LATE_JOIN_SPECTATE"));
+      return;
     }
+    // Already in the round: CT is this mode's "publicly confirmed innocent" signal, so a move
+    // between playing teams forges or erases a reveal. The C# refused the command; undo it.
+    enforceRoundTeam(slot, newTeam);
     return;
   }
 
-  // Leaving to spectator mid-round while still holding a live role is a way to dodge being killed,
-  // so it counts as a death — the C# dispatched a PlayerDeathEvent for exactly this.
-  if (newTeam === Team.Spectator && reg.isAlive(slot) && reg.roleOf(slot) !== RoleId.None) {
-    onSelfSpectate(slot);
+  if (newTeam === Team.Spectator || newTeam === Team.None) {
+    // Leaving to spectator mid-round while still holding a live role is a way to dodge being
+    // killed, so it counts as a death — the C# dispatched a PlayerDeathEvent for exactly this.
+    if (newTeam === Team.Spectator && reg.isAlive(slot) && reg.roleOf(slot) !== RoleId.None) {
+      onSelfSpectate(slot);
+    }
+    // Dead or alive, a role-holder whose body has not been found must not sit in the spectator
+    // list: it publicly announces the death the whole round is built on hiding.
+    enforceRoundTeam(slot, newTeam);
   }
 }
 

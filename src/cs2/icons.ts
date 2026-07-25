@@ -40,9 +40,15 @@
  *  - **`m_szClan` is not in the s2script schema** and there is no `setClan`, so the scoreboard tag
  *    rides `Player.setName` as a `"[D] "` prefix. Unlike the clan column a name prefix is also
  *    visible in the kill feed and in engine-generated text; the plugin's own chat lines are
- *    unaffected because they read the cached `reg.nameOf`. The real name is cached here before the
- *    first prefix is written and restored at the next countdown — which is BEFORE `beginRound`
- *    refreshes the registry's name cache, so a prefixed name can never be re-cached as the real one.
+ *    unaffected because they read the cached `reg.nameOf`. Because the prefix lands on the engine's
+ *    own name field, the real name has to survive everything that can happen while a tag is on: it
+ *    is cached before the first prefix is written, put back at the next countdown (BEFORE
+ *    `beginRound` refreshes the registry's name cache) and put back again by `resetIcons` on map
+ *    change or unload — and, as a belt-and-braces third line, `setRoleTag` strips any tag THIS
+ *    module could have written before it caches. The strip is what makes the cache idempotent: the
+ *    round-end reveal leaves every player prefixed until the next countdown, and a map vote that
+ *    resolves inside that window has `reg.seedFromEngine` re-read the live (prefixed) engine name,
+ *    so without it "[T] Bob" would be re-cached as Bob's real name and grow a bracket per map.
  *  - **Only this plugin's own worldtext is destroyed** at round start. The C# killed every
  *    `point_worldtext` on the map, which would take a map's own signage with it.
  */
@@ -86,9 +92,10 @@ const HAT_YAWS: readonly number[] = [270, 180];
 const icons: (EntityRef | null)[] = new Array<EntityRef | null>(MAX_SLOTS * 2).fill(null);
 
 /**
- * Slots holding a Traitor icon this round — the transpose of `traitorsThisRound`. It only grows
- * (the C# never removed a dead Traitor either; their icon is destroyed on death, so a stale viewer
- * entry has nothing to reveal).
+ * Slots holding a Traitor icon this round — the transpose of `traitorsThisRound`. Death does not
+ * remove a slot (the C# did not either; the icon is destroyed on death, so a stale viewer entry has
+ * nothing to reveal), but a DISCONNECT does: a slot with nobody in it can be reoccupied mid-round,
+ * and the new client would inherit the departed Traitor's view. See the `leave` handler.
  */
 const traitors: number[] = [];
 
@@ -348,6 +355,43 @@ export function armStickers(slot: number): void {
   if (slot >= 0 && slot < MAX_SLOTS) stickers[slot] = 1;
 }
 
+/** Every role `setRoleTag` can be called with — the prefixes that may already be on a name. */
+const TAG_ROLES: readonly RoleId[] = [
+  RoleId.Innocent,
+  RoleId.Traitor,
+  RoleId.Detective,
+  RoleId.Spectator,
+];
+
+/** The exact prefix `setRoleTag` writes for `role`. */
+function roleTagPrefix(role: RoleId): string {
+  return `[${iconLetter(role)}] `;
+}
+
+/**
+ * Strip every prefix this module could have written off `name`.
+ *
+ * Matched against the live role prefixes rather than a generic `^\[.\] ` pattern for two reasons: a
+ * phrase-file override can make the letter non-Latin (`iconLetter` falls back to the first
+ * character), and a player whose own name genuinely starts with a bracketed initial keeps it. The
+ * loop repeats because a tree that ran before this guard existed can carry "[T] [T] Bob"; each pass
+ * removes at least four characters, so it always terminates.
+ */
+function stripRoleTags(name: string): string {
+  let out = name;
+  for (;;) {
+    const before = out;
+    for (let i = 0; i < TAG_ROLES.length; i++) {
+      const prefix = roleTagPrefix(TAG_ROLES[i]!);
+      if (out.startsWith(prefix)) {
+        out = out.slice(prefix.length);
+        break;
+      }
+    }
+    if (out === before) return out;
+  }
+}
+
 /**
  * Write a role tag onto the scoreboard name — the stand-in for `SetClan`, see the header.
  *
@@ -357,7 +401,11 @@ export function armStickers(slot: number): void {
 function setRoleTag(slot: number, role: RoleId): void {
   const p = Player.fromSlot(slot);
   if (p === null) return;
-  if (tagged[slot] === 0) realNames[slot] = reg.nameOf(slot);
+  // `reg.nameOf` can hand back a name this module already prefixed — `reg.seedFromEngine` reads the
+  // live engine name, and a map change during the round-end reveal window happens while every
+  // participant is still tagged. Strip first so the cache holds the real name either way; without
+  // this the tag nests one bracket deeper on every such map change.
+  if (tagged[slot] === 0) realNames[slot] = stripRoleTags(reg.nameOf(slot));
   const real = realNames[slot]!;
   if (real === "") return;
   tagged[slot] = 1;
@@ -396,9 +444,18 @@ function clearAllIcons(): void {
  *
  * `Transmit.resetAll` is safe to call from here because role icons are the only thing in this
  * plugin that installs a transmit rule.
+ *
+ * Call this BEFORE `reg.seedFromEngine()` on map start: the names have to be back on the engine
+ * before anything re-reads them. (`setRoleTag`'s strip makes the wrong order survivable rather than
+ * corrupting, but only this order leaves the player's own name on their scoreboard entry.)
  */
 export function resetIcons(): void {
   clearAllIcons();
+  // Put every tagged name back BEFORE the bookkeeping that knows what the real name was is dropped
+  // — otherwise the round-end reveal's "[T] " outlives the module and becomes the player's name.
+  // All slots, not `reg.activeSlots()`: on unload the roster may already be gone, and `clearRoleTag`
+  // is a no-op for a slot this module never tagged.
+  for (let slot = 0; slot < MAX_SLOTS; slot++) clearRoleTag(slot);
   stickers.fill(0);
   tagged.fill(0);
   realNames.fill("");
@@ -492,7 +549,16 @@ export function installIcons(bus: EventBus<TttEvents>): void {
     stickers[ev.slot] = 0;
     tagged[ev.slot] = 0;
     realNames[ev.slot] = "";
+    // Whoever takes this slot next inherits none of the departing player's state, so the reveal
+    // flag goes with them — a stale 1 would make `refreshTraitorIcons` skip the new occupant.
+    revealed[ev.slot] = 0;
     const i = traitors.indexOf(ev.slot);
-    if (i >= 0) traitors.splice(i, 1);
+    if (i < 0) return;
+    traitors.splice(i, 1);
+    // `setVisibleTo` REPLACES a snapshot of the viewer set, so dropping the slot from `traitors`
+    // changes nothing engine-side until every live Traitor icon is re-pushed. Without this the
+    // freed slot keeps transmit rights on every Traitor panel installed while it was occupied, and
+    // the next client to take it sees the whole Traitor roster floating over their heads.
+    refreshTraitorIcons();
   });
 }

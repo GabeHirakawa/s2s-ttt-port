@@ -13,19 +13,24 @@
 
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
-import { RoleId, Team } from "../core/enums";
-import { pawnOf, teamOf } from "./pawn";
+import { RoleId } from "../core/enums";
+import { pawnOf } from "./pawn";
 
 /**
  * Player models used for corpses.
  *
  * The C# build copied the victim's own model off the pawn's skeleton instance
  * (`CBodyComponent.SceneNode.GetSkeletonInstance().ModelState.ModelName`); that path is not exposed
- * through the s2script schema, so a corpse gets the stock model for the team it died on. Visually
+ * through the s2script schema, so a corpse gets the stock model for the role it died in. Visually
  * this differs from the original only for players wearing non-default agents.
+ *
+ * These are deliberately the SAME two paths `cs2/icons.ts` dresses the living in: now that every
+ * player wears a role uniform, a corpse spawned with any other model would not look like the player
+ * it came from — most visibly for the Detective, whose body is the one thing everyone goes looking
+ * for.
  */
 const MODEL_T = "characters/models/tm_phoenix/tm_phoenix.vmdl";
-const MODEL_CT = "characters/models/ctm_sas/ctm_sas.vmdl";
+const MODEL_CT = "characters/models/ctm_fbi/ctm_fbi_varianth.vmdl";
 
 /** A dead player's corpse. */
 export interface Body {
@@ -102,7 +107,10 @@ export function spawnBody(
   const origin = pawn.origin;
   if (origin === null) return null;
   const angles = pawn.angles;
-  const model = teamOf(slot) === Team.Terrorist ? MODEL_T : MODEL_CT;
+  // Picked by ROLE, exactly as `icons.ts::applyRoleModel` picks the living player's uniform. Team
+  // gives the same answer for the whole of a live round (Detective on CT, everyone else on T), but
+  // not once `revealAsInnocent` has started moving found Innocents across at the end of one.
+  const model = role === RoleId.Detective ? MODEL_CT : MODEL_T;
 
   // One corpse per player per round: an admin respawn mid-round would otherwise leave the old
   // ragdoll behind, and a second body for the same player breaks the identification bookkeeping.
@@ -158,8 +166,14 @@ export function spawnBody(
   return body;
 }
 
-/** Destroy one body's ragdoll and forget it. */
-function removeBody(body: Body): void {
+/**
+ * Destroy one body's ragdoll and forget it.
+ *
+ * Exported because `combat.ts` has to undo a corpse a `bodyCreate` listener cancelled: removing only
+ * the entity would leave the `Body` record in `bodies`/`byIndex`/`byOwner`, where `nearestBody`
+ * still hands it out as an invisible, un-identifiable corpse.
+ */
+export function removeBody(body: Body): void {
   body.ref.remove();
   byIndex.delete(body.index);
   if (byOwner.get(body.owner) === body) byOwner.delete(body.owner);

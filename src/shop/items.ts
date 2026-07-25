@@ -14,9 +14,10 @@
 import { RoleId } from "../core/enums";
 import { n, list, s as str } from "../core/cvars";
 import { msg } from "../core/msgs";
+import { giveArmorWithHelmet } from "../cs2/handlers";
 import { armStickers } from "../cs2/icons";
 import { clearSlot, GearSlot, give } from "../cs2/inventory";
-import { setArmor, tell } from "../cs2/pawn";
+import { tell } from "../cs2/pawn";
 import { register, type ShopItem, PurchaseResult } from "./shop";
 import * as fx from "./effects";
 import * as wfx from "./weaponfx";
@@ -54,7 +55,10 @@ export function registerItems(): void {
   // ── universal ─────────────────────────────────────────────────────────────
   register(
     item("armor", "SHOP_ITEM_ARMOR", "SHOP_ITEM_ARMOR_DESC", RoleId.None, "css_ttt_shop_armor_price", (slot) => {
-      setArmor(slot, n("css_ttt_shop_armor_amount"));
+      // `ArmorItem.OnPurchase` is `SetArmor(config.Armor, config.Helmet)` and `ArmorConfig.Helmet`
+      // ships `true`, so the item has always included the helmet — a bare armor value leaves the
+      // buyer taking full headshot damage, which is most of what they paid for.
+      giveArmorWithHelmet(slot, n("css_ttt_shop_armor_amount"));
     }),
   );
 
@@ -76,7 +80,9 @@ export function registerItems(): void {
 
   register(
     item("taser", "SHOP_ITEM_TASER", "SHOP_ITEM_TASER_DESC", RoleId.None, "css_ttt_shop_taser_price", (slot) => {
-      give(slot, "weapon_taser");
+      // `grantTaser` is the whole of `TaserItem.OnPurchase`: remove-then-give of the CONFIGURED
+      // weapon, so re-buying refreshes a spent taser. A hard-coded `give("weapon_taser")` here both
+      // duplicated that grant and ignored `css_ttt_shop_taser_weapon`.
       fx.grantTaser(slot);
     }),
   );
@@ -182,7 +188,10 @@ export function registerItems(): void {
 
   register(
     item("poisonshots", "SHOP_ITEM_POISON_SHOTS", "SHOP_ITEM_POISON_SHOTS_DESC", RoleId.Traitor, "css_ttt_shop_poisonshots_price", (slot) => {
-      fx.grantPoisonShots(slot, n("css_ttt_shop_poisonshots_total"));
+      // The counter lives in `weaponfx.ts`, not `effects.ts`: a charge is spent on FIRE (and the
+      // same counter silences the pistol through the shared fire-sound hook), while `effects.ts`
+      // only READS it to decide whether a landed pistol hit poisons.
+      wfx.grantPoisonShots(slot, n("css_ttt_shop_poisonshots_total"));
     }, { limit: 1 }),
   );
 

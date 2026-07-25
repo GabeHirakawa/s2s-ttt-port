@@ -82,10 +82,21 @@ let bus: EventBus<TttEvents>;
  */
 export const MAX_KARMA = 100;
 
-/** Minutes the built-in ban fallback bans for — the duration baked into the stock low-karma command. */
+/**
+ * The shipped default of `css_ttt_karma_low_command` (src/core/cvars.ts), verbatim.
+ *
+ * It names `sm_ban`, which a bare s2script server does not implement (the C# shipped the
+ * CounterStrikeSharp spelling `css_ban` for the same reason: on *their* runtime it existed). Leaving
+ * the cvar untouched therefore has to mean "eject them", not "run a console line that resolves to
+ * nothing" — which is what {@link punishLowKarma} keys off. Kept in sync with cvars.ts by hand;
+ * a mismatch only costs the built-in fallback, it cannot misfire the operator's own command.
+ */
+const STOCK_LOW_KARMA_COMMAND = "sm_ban #{0} 2880 Low Karma";
+
+/** Minutes the built-in ban fallback bans for — the duration baked into {@link STOCK_LOW_KARMA_COMMAND}. */
 const LOW_KARMA_BAN_MINUTES = 2880;
 
-/** Reason shown for the built-in low-karma ban/kick. */
+/** Reason shown for the built-in low-karma ban/kick — the reason baked into the stock command. */
 const LOW_KARMA_REASON = "Low Karma";
 
 /** Current karma for a slot. */
@@ -111,11 +122,16 @@ export function setKarma(slot: number, value: number): void {
   // the credit-scale divisor, so a veteran is *supposed* to bank a buffer above the sit-out
   // threshold instead of saturating with everyone else.
   const rounded = Math.round(value);
+  // Resolved BEFORE the dispatch, not after. A `karma` listener may eject the player (the low-karma
+  // branch of `enforce`), and a kick that lands synchronously runs `reg.removePlayer`, which blanks
+  // `steamIds[slot]` — reading the id afterwards would silently drop the write to `persisted` and
+  // leave the offender's stored karma negative, so the ban would re-fire on their next update. The
+  // slot's identity for THIS write is fixed at call time.
+  const id = reg.steamIdOf(slot);
   const ev = bus.emit("karma", { slot, oldKarma: old, karma: rounded, canceled: false });
   if (ev.canceled) return;
 
   karma[slot] = ev.karma;
-  const id = reg.steamIdOf(slot);
   if (id !== "" && id !== "0") persisted.set(id, ev.karma);
   setScore(slot, ev.karma);
 }
@@ -134,8 +150,8 @@ export function flushKarma(): void {
     const delta = pending[slot]!;
     if (delta === 0) continue;
     // Cleared BEFORE the write, not with a fill() afterwards: setKarma can re-enter this table via
-    // the low-karma branch (which ejects the player, and the `leave` handler settles their pending
-    // delta), and a delta that is still sitting here would then be paid twice.
+    // the low-karma branch (which ejects the player, and the `leave` handler settles whatever is
+    // still owed), and a delta left sitting here would then be paid twice.
     pending[slot] = 0;
     setKarma(slot, karma[slot]! + delta);
   }
@@ -188,6 +204,29 @@ function stashBench(slot: number): void {
   }
   benchRounds.set(id, rounds);
   benchWarned.set(id, warned);
+}
+
+/**
+ * Bank a departing player's outstanding karma WITHOUT going through {@link setKarma}.
+ *
+ * This is the one write that must not dispatch `karma`. In C# a quitter's queued deltas sit in
+ * `KarmaUpdateManager.updateQueue` until `KarmaListener.OnRoundEnd` flushes them, and by then
+ * `KarmaBanner.issueKarmaBan`'s `converter.GetPlayer(player) == null` is true — so a departed
+ * offender is neither ejected nor reset to the default, and their negative karma is still waiting
+ * for them when they come back. Here `leave` is emitted from inside `ctx.clients.onDisconnect`,
+ * where `Player.fromSlot(slot)` still resolves, so dispatching would take the branch C# never
+ * takes: a 48h ban plus a reset for someone who is already gone.
+ *
+ * The sit-out half of the flush still applies — `issueKarmaWarning` records against the SteamID —
+ * so it is called directly, and only above the ban floor, since `OnKarmaUpdate` returns before it.
+ */
+function settleOnLeave(slot: number, value: number): void {
+  const settled = Math.round(value);
+  karma[slot] = settled;
+  const id = reg.steamIdOf(slot);
+  if (id !== "" && id !== "0") persisted.set(id, settled);
+  // No setScore: the scoreboard entry of a client the engine is tearing down goes with it.
+  if (settled >= cfg.karmaMin) benchLowKarma(slot, settled);
 }
 
 /**
@@ -332,16 +371,31 @@ function grantRoundKarma(winner: RoleId): void {
 /**
  * Eject a player whose karma fell through the floor, the way `KarmaBanner.issueKarmaBan` does.
  *
- * The configured command is the primary path. An EMPTY command falls back to the SDK ban store,
- * because the stock default is a SourceMod-style `sm_ban` that a bare s2script server does not
- * implement — without a fallback the entire branch would be a no-op on a default install. `Bans.add`
- * only records the ban (enforcement is a connect-time check owned by a ban plugin), so the kick has
- * to be issued here too. An operator who wants no punishment at all points the cvar at a harmless
- * command rather than clearing it.
+ * Three cases, and the gate is on WHICH command is configured rather than on whether one is:
+ *
+ * - **Blank** — nothing happens. `issueKarmaBan` runs `string.Format(CommandUponLowKarma, userId)`
+ *   unconditionally, so an empty setting executes an empty console line, i.e. a no-op. Clearing the
+ *   cvar is the only "turn punishment off" switch the C# offers and it keeps working here.
+ * - **The untouched default** — the SDK ban store, because {@link STOCK_LOW_KARMA_COMMAND} names a
+ *   command this runtime does not have. Without this the whole branch is a no-op on a default
+ *   install: karma below the floor would eject nobody. `Bans.add` only *records* the ban
+ *   (enforcement is a connect-time check owned by a ban plugin), so the kick is issued here too.
+ * - **Anything the operator wrote** — authoritative and exclusive. They asked for that command; a
+ *   built-in ban on top of it would be a second, unrequested punishment.
+ *
+ * The reset to the default karma is NOT done here — it is a rewrite of the in-flight event, see
+ * {@link enforce}.
  */
 function punishLowKarma(slot: number, player: Player): void {
-  const command = s("css_ttt_karma_low_command");
-  if (command !== "") {
+  // Read the LIVE ConVar, not the config snapshot. `refresh()` maps an empty ConVar back to the
+  // registered default for every kind (core/cvars.ts), so an operator who deliberately clears this
+  // to switch punishment OFF would read back the stock ban command and get banned anyway — the
+  // exact inversion of what they asked for. `Server.getCvar` returns "" only when it is genuinely
+  // cleared, which is the same "do nothing" the C# gets from `string.Format("", userId)`.
+  const command = Server.getCvar("css_ttt_karma_low_command");
+  if (command === "") return;
+
+  if (command !== STOCK_LOW_KARMA_COMMAND) {
     // The command is operator-authored config; the user id is an engine integer, so there is no
     // untrusted text in the console string.
     Server.command(command.replace("{0}", String(player.userId)));
@@ -369,17 +423,33 @@ function enforce(ev: KarmaEvent): void {
     // them when they come back.
     const player = Player.fromSlot(slot);
     if (player === null) return;
-    punishLowKarma(slot, player);
     // The reset REWRITES the in-flight event rather than calling setKarma() again. We are inside
     // the dispatch that setKarma is about to read back from, so a nested write would be undone by
     // the outer `karma[slot] = ev.karma` a moment later and the offender would stay negative,
     // re-firing the ban command at every round end. C# reaches the same net stored value the long
     // way round, by deferring the DefaultKarma write to a later frame.
+    //
+    // Rewritten BEFORE the eject so the ordering is not load-bearing: whether or not the kick
+    // re-enters this module synchronously, the value setKarma stores is already the final one.
     ev.karma = cfg.karmaDefault;
+    punishLowKarma(slot, player);
     return;
   }
 
-  if (ev.karma >= cfg.karmaTimeoutThreshold) return;
+  // `return` above, exactly as `OnKarmaUpdate` does: a player who fell through the ban floor is
+  // never *also* benched.
+  benchLowKarma(slot, ev.karma);
+}
+
+/**
+ * The sit-out half of `KarmaBanner.OnKarmaUpdate` — `issueKarmaWarning`, behind its warning window.
+ *
+ * Split out of {@link enforce} because it is the only half that still applies to a player who has
+ * already left: `cooldownRounds`/`lastWarned` are keyed by `IPlayer`, i.e. by SteamID, so a quitter
+ * whose settled karma lands under the threshold is still benched for their return.
+ */
+function benchLowKarma(slot: number, value: number): void {
+  if (value >= cfg.karmaTimeoutThreshold) return;
   const now = Date.now();
   if (now - lastWarned[slot]! <= cfg.karmaWarningWindowMs) return;
   lastWarned[slot] = now;
@@ -451,9 +521,9 @@ export function installKarma(eventBus: EventBus<TttEvents>): void {
     // it queued would charge it to whoever takes the slot next.
     const owed = pending[slot]!;
     pending[slot] = 0;
-    if (owed !== 0) setKarma(slot, karma[slot]! + owed);
+    if (owed !== 0) settleOnLeave(slot, karma[slot]! + owed);
 
-    // After the flush, so a sit-out that delta just earned them is the one that gets carried.
+    // After the settle, so a sit-out that delta just earned them is the one that gets carried.
     stashBench(slot);
     clearSlotState(slot);
   });

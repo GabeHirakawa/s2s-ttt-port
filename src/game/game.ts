@@ -429,12 +429,16 @@ export function tickWaiting(dt: number): void {
 
 /** A map changed under us: abandon any live round. */
 export function onMapChange(): void {
-  game.roundsThisMap = 0;
   clearBodies(false);
   if (game.state === GameState.InProgress || game.state === GameState.Countdown) {
     endGame(RoleId.None, "Map Change");
   }
   game.state = GameState.Waiting;
+  // Zero the counter AFTER the round is folded up, not before: `endGame` increments it, and the
+  // round it is counting was played on the map being left. Resetting first handed the new map that
+  // abandoned round, so `css_ttt_special_min_rounds_after_map` (read as `roundsThisMap < n`) came
+  // due one full round early after every map change.
+  game.roundsThisMap = 0;
   // Bump LAST, not first. `endGame` arms its own timers (the round-end terminate and the FINISHED
   // watchdog) against a fresh token, so a bump taken before it invalidates only the timers of the
   // round that is already over and leaves those two live — they would then fire into the new map,

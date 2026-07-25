@@ -48,29 +48,36 @@ import { msg, precompileAll, setPhrases } from "./core/msgs";
 import * as reg from "./core/registry";
 
 import {
-  checkEndConditions, game, initGame, inWarmup, onEngineRoundStart, onMapChange, startGame,
-  syncRosterAndAnnounce, tickCountdown, tickWaiting,
+  checkEndConditions, game, initGame, inWarmup, onEngineRoundEnd, onEngineRoundStart, onMapChange,
+  startGame, syncRosterAndAnnounce, tickCountdown, tickWaiting,
 } from "./game/game";
 import { logPurchase, logRoleAssigned } from "./game/logger";
 import { roleName } from "./game/roles";
 
-import { invalidatePawnCache, onDamage, onDeathPre, onPlayerHurt, onSpawn } from "./cs2/combat";
+import {
+  installMatchStats, invalidatePawnCache, onDamage, onDeathPre, onPlayerHurt, onSpawn,
+} from "./cs2/combat";
 import { clearBodies, precacheBodyModels } from "./cs2/bodies";
 import { initInteract, resetInteract, tickInteract } from "./cs2/interact";
 import { resetSpoof, tickSpoof } from "./cs2/spoof";
 import { installFeedback } from "./cs2/feedback";
+import { wouldRefuseTeam } from "./game/teams";
+import { installIcons, precacheRoleModels, resetIcons } from "./cs2/icons";
 import {
   handleChat, installBombSuppressor, installHandlers, onItemPurchase, onTeamChange,
-  removeBuyZones, setSelfSpectateHandler, tickHandlers, unmuteAll,
+  removeBuyZones, resetBuyZones, setSelfSpectateHandler, tickHandlers, unmuteAll,
 } from "./cs2/handlers";
 
 import { installKarma } from "./karma/karma";
 import { initShop, itemById, refreshItems } from "./shop/shop";
 import { registerItems } from "./shop/items";
-import { installEffects, releaseC4, resetEffects, tickEffects } from "./shop/effects";
+import { installEffects, onBulletImpact, releaseC4, resetEffects, tickEffects } from "./shop/effects";
 import { installEconomy, tickEconomy } from "./shop/economy";
 import { installSpecialRounds, tickSpecialRounds } from "./special/rounds";
-import { installWeaponFx, onHeDetonate, onSmokeDetonate, resetWeaponFx } from "./shop/weaponfx";
+import {
+  installWeaponFx, onHeDetonate, onSmokeDetonate, onSmokeExpired, onWeaponFire, resetWeaponFx,
+  tickWeaponFx,
+} from "./shop/weaponfx";
 
 import { registerCommands } from "./commands";
 
@@ -151,7 +158,11 @@ export default plugin((ctx) => {
   installSpecialRounds(bus);
   installWeaponFx(bus);
   installHandlers(bus);
+  // combat.ts self-installs on the first death, but wiring it here also catches the round-start
+  // scoreboard clear that happens before anyone has died.
+  installMatchStats(bus);
   installFeedback(bus);
+  installIcons(bus);
   // Ducking out to spectator mid-round counts as dying — it must not be a way to dodge a Traitor.
   setSelfSpectateHandler((slot) => {
     reg.setAlive(slot, false);
@@ -221,9 +232,23 @@ export default plugin((ctx) => {
     if (slot >= 0) onSpawn(slot);
   });
 
+  // Suppress the client broadcast for a team change TTT is about to undo. `Handled` stops the
+  // "X has joined the Spectators" notification reaching clients; the server still applies the
+  // change, which the post-event handler below reverses. Splitting it this way means the switch is
+  // issued exactly once, while the leak — a dead player's team move announcing their death — never
+  // reaches anybody.
+  ctx.events.onPre("player_team", (ev): HookResultValue | void => {
+    const slot = ev.getPlayerSlot("userid");
+    if (wouldRefuseTeam(slot, ev.getInt("team") as Team, ev.getBool("disconnect"))) {
+      return HookResult.Handled;
+    }
+  });
+
   ctx.events.on("player_team", (ev) => {
     const slot = ev.getPlayerSlot("userid");
-    onTeamChange(slot, ev.getInt("team") as Team);
+    // A leaving player fires `player_team` for team None on the way out; the flag lets the team
+    // guard tell that apart from a live player ducking to spectator, which it must undo.
+    onTeamChange(slot, ev.getInt("team") as Team, ev.getBool("disconnect"));
     // A team change alters who is eligible; re-derive liveness and re-check the round.
     reg.resyncAlive();
     checkEndConditions();
@@ -234,6 +259,9 @@ export default plugin((ctx) => {
     // execs AFTER `onMapStart`, so anything set there is overwritten (`mp_warmuptime` in
     // particular, which would otherwise keep the server in a warmup TTT never starts a round from).
     applyServerSettings();
+    // Same reason the settings are re-applied here: the map's buy zones are not spawned yet at
+    // `onMapStart`, so this is the first point at which they can actually be found and removed.
+    removeBuyZones();
     invalidatePawnCache();
     onEngineRoundStart();
   });
@@ -244,9 +272,12 @@ export default plugin((ctx) => {
     if (game.state === GameState.Waiting) startGame();
   });
 
-  // The engine's own round end must not decide a TTT round; TTT ends its rounds itself.
+  // The engine's own round end must not decide a TTT round, but it does restart the round out from
+  // under us — so suppress the broadcast AND fold the TTT round up behind it.
   ctx.events.onPre("round_end", (): HookResultValue | void => {
-    if (game.state === GameState.InProgress) return HookResult.Handled;
+    if (game.state !== GameState.InProgress) return;
+    onEngineRoundEnd();
+    return HookResult.Handled;
   });
 
   // A resolved bomb frees up a C4 slot for the "max at once" purchase gate.
@@ -255,11 +286,33 @@ export default plugin((ctx) => {
 
   // Grenade detonations drive the Poison Smoke and Cluster Grenade items.
   ctx.events.on("smokegrenade_detonate", (ev) => {
-    onSmokeDetonate(ev.getPlayerSlot("userid"), ev.getFloat("x"), ev.getFloat("y"), ev.getFloat("z"));
+    // The projectile index is what lets the poison cloud die with the smoke that carries it,
+    // rather than running out a fixed lifetime the map's own smoke never agreed to.
+    onSmokeDetonate(
+      ev.getPlayerSlot("userid"),
+      ev.getFloat("x"), ev.getFloat("y"), ev.getFloat("z"),
+      ev.getInt("entityid"),
+    );
+  });
+
+  // The poison goes when the cloud does.
+  ctx.events.on("smokegrenade_expired", (ev) => {
+    onSmokeExpired(ev.getInt("entityid"));
   });
 
   ctx.events.on("hegrenade_detonate", (ev) => {
     onHeDetonate(ev.getPlayerSlot("userid"), ev.getFloat("x"), ev.getFloat("y"), ev.getFloat("z"));
+  });
+
+  // Poison Shots burns a charge on every pistol trigger pull, hit or miss — the C# spent the charge
+  // on FIRE and only READ the counter on damage, so the shot that spends the last one lands clean.
+  ctx.events.on("weapon_fire", (ev) => {
+    onWeaponFire(ev.getPlayerSlot("userid"), ev.getString("weapon"));
+  });
+
+  // Placed gadgets are shootable: a bullet pops a tripwire or takes a station's health down.
+  ctx.events.on("bullet_impact", (ev) => {
+    onBulletImpact(ev.getPlayerSlot("userid"), ev.getFloat("x"), ev.getFloat("y"), ev.getFloat("z"));
   });
 
   ctx.events.onPre("item_purchase", (ev): HookResultValue | void => {
@@ -276,12 +329,19 @@ export default plugin((ctx) => {
   // ── map lifecycle ─────────────────────────────────────────────────────────
   ctx.server.onPrecache((pc) => {
     precacheBodyModels(pc);
+    precacheRoleModels(pc);
   });
 
   ctx.server.onMapStart(() => {
     onMapChange();
+    // BEFORE `seedFromEngine`: role name tags are written at the Finished transition and are still
+    // on the engine names here, and `resetIcons` is what puts the originals back. Seeding first
+    // would cache "[T] Bob" as Bob's real name and add a bracket on every map change.
+    resetIcons();
     reg.seedFromEngine();
-    removeBuyZones();
+    // Only clears the one-shot latch — the zones themselves are not spawned yet, so the removal
+    // proper waits for `round_start`.
+    resetBuyZones();
     resetInteract();
     resetEffects();
     resetSpoof();
@@ -292,7 +352,6 @@ export default plugin((ctx) => {
   });
 
   installBombSuppressor();
-
 
   applyServerSettings();
 
@@ -317,6 +376,7 @@ export default plugin((ctx) => {
 
     tickInteract(dt);
     tickEffects(dt);
+    tickWeaponFx(dt);
     tickEconomy(dt);
     tickSpecialRounds();
 
@@ -341,6 +401,8 @@ export default plugin((ctx) => {
       resetWeaponFx();
       resetInteract();
       resetSpoof();
+      // Drops the role icons and puts every tagged name back: an unload must not leave "[T] Bob".
+      resetIcons();
       unmuteAll();
       reg.resetRegistry();
       bus.clear();

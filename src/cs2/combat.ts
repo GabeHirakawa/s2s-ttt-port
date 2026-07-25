@@ -32,8 +32,8 @@ import * as reg from "../core/registry";
 import { checkEndConditions, inProgress } from "../game/game";
 import { roleName } from "../game/roles";
 import { logDamage, logDeath } from "../game/logger";
-import { spawnBody } from "./bodies";
-import { setArmor, setHealth, tell } from "./pawn";
+import { removeBody, spawnBody } from "./bodies";
+import { clearAttributedKills, setArmor, setHealth, takeAttributedKiller, tell } from "./pawn";
 import { hidePawn, resetPawnColor } from "./color";
 import { spoofAlive, unspoofAlive } from "./spoof";
 import { refreshInvulnerability } from "./handlers";
@@ -364,26 +364,16 @@ function bumpStat(slot: number, field: number, delta: number): void {
 }
 
 /**
- * Nudge the controller's own kill counter.
- *
- * Schema-typed and therefore always available, unlike the match-stats block above — so this half of
- * the rollback keeps working on a build whose offsets could not be resolved. It is not the K/D
- * column, which is why it does not replace the raw path.
- */
-function bumpKillCount(slot: number, delta: number): void {
-  const p = Player.fromSlot(slot);
-  if (p === null) return;
-  const cur = p.killCount;
-  if (cur === null) return;
-  p.killCount = Math.max(0, cur + delta);
-}
-
-/**
  * Undo everything the engine wrote for this death, and bank what is owed back at round end.
  *
  * Called BEFORE the round-state gate in `onDeathPre`, matching the C#, which runs
  * `hideAndTrackStats` above its own `State.IN_PROGRESS` early-return: the engine incremented these
  * columns regardless of what TTT thinks the round is doing.
+ *
+ * `killer` is always the attacker the ENGINE reported, never the gadget-repaired one `onDeathPre`
+ * resolves further down: these columns only need undoing where the engine actually wrote them, and
+ * subtracting a kill the engine never granted would take a real one off the gadget owner's column
+ * (the floor in `bumpStat` swallows it) and then hand it back at round end as a kill they never had.
  */
 function rollbackDeathStats(
   victim: number,
@@ -392,32 +382,39 @@ function rollbackDeathStats(
   dmgHealth: number,
 ): void {
   if (statsMode === StatsMode.Unknown) probeStats(victim, F_DEATHS, 1);
-
-  // Bank first, and outside the raw-path gate: `killCount` is rolled back through the typed schema
-  // whether or not the offsets resolved, so its re-add at round end must be banked either way. The
-  // subtract and the re-add are then symmetric in both modes — the one asymmetric window is a probe
-  // that only succeeds after a few deaths, which can leave a handful of counts un-subtracted but
-  // re-added; the round-start clear bounds it to that round.
-  //
-  // A suicide is not banked as a kill — the engine credits nobody for it, and the floor in
-  // `bumpStat` already absorbs the C#'s unconditional decrement below.
-  if (killer >= 0 && killer !== victim) {
-    bankedKills[killer] = bankedKills[killer]! + 1;
-    bumpKillCount(killer, -1);
-  }
-  if (assister >= 0 && assister !== killer && assister !== victim) {
-    bankedAssists[assister] = bankedAssists[assister]! + 1;
-  }
+  // Everything below is the raw match-stats path plus the bank that mirrors it. Banking without the
+  // matching subtract is worse than doing neither: a probe that only flips to Enabled later in the
+  // round would then hand out kills at round end that were never taken off in the first place.
+  if (statsMode !== StatsMode.Enabled) return;
 
   bumpStat(victim, F_DEATHS, -1);
-  if (killer >= 0) {
+
+  // A suicide is skipped ENTIRELY — subtract and bank alike. Every script-driven kill reaches the
+  // engine through `pawn.slay()`, which reports the victim as their own attacker, so this branch is
+  // taken by every gadget kill and every admin slay, not just by a rare rage-quit `kill`.
+  //
+  // The C# nets to zero here by accident: `hideAndTrackStats` does `killerStats.Kills -= 1` for any
+  // non-null Attacker (CombatHandler.cs:99) and `PlayerStatsTracker.OnKill` banks it straight back
+  // for any non-null Killer (PlayerStatsTracker.cs:52), and `PlayerDeathEvent.Killer` is `ev.Attacker`
+  // — the victim themselves on a suicide. Doing neither reaches the same end state without the
+  // round-long window in which the victim's Kills column reads one short, and without the C#'s
+  // permanent ADR loss (damage is banked but NEVER re-added, see the module note). What must not
+  // happen is one half without the other: gating only the bank quietly destroyed one of the
+  // victim's own kills, for good, on every gadget kill and every slay.
+  if (killer >= 0 && killer !== victim) {
+    bankedKills[killer] = bankedKills[killer]! + 1;
     bumpStat(killer, F_KILLS, -1);
     bumpStat(killer, F_DAMAGE, -dmgHealth);
     // The C# zeroes utility damage outright rather than subtracting this kill's share of it.
     setStat(killer, F_UTILITY_DAMAGE, 0);
   }
-  // `assisterStats != killerStats` in the C#: one player credited with both keeps the assist.
-  if (assister >= 0 && assister !== killer) bumpStat(assister, F_ASSISTS, -1);
+
+  // `assisterStats != killerStats` in the C#: one player credited with both keeps the assist. Same
+  // gate on both halves for the same reason as above.
+  if (assister >= 0 && assister !== killer && assister !== victim) {
+    bankedAssists[assister] = bankedAssists[assister]! + 1;
+    bumpStat(assister, F_ASSISTS, -1);
+  }
 }
 
 /**
@@ -442,10 +439,7 @@ function revealStats(): void {
       bumpStat(slot, F_DEATHS, 1);
     }
     const kills = bankedKills[slot]!;
-    if (kills > 0) {
-      bumpStat(slot, F_KILLS, kills);
-      bumpKillCount(slot, kills);
-    }
+    if (kills > 0) bumpStat(slot, F_KILLS, kills);
     const assists = bankedAssists[slot]!;
     if (assists > 0) bumpStat(slot, F_ASSISTS, assists);
   }
@@ -486,6 +480,7 @@ export function installMatchStats(bus: EventBus<TttEvents>): void {
         bankedAssists.fill(0);
         deathRevealed.fill(0);
         clearGadgetKills();
+        clearAttributedKills();
         return;
       }
       if (ev.state === GameState.Finished) revealStats();
@@ -504,9 +499,13 @@ export function installMatchStats(bus: EventBus<TttEvents>): void {
  * with a `killedWith*` table per item, filled on the tick the damage turned lethal and read back in
  * an `OnRagdollSpawn(BodyCreateEvent)` handler that rewrote `ev.Body.Killer`.
  *
- * Here the pending entry is consumed at the top of `handleDeath` instead of in a `bodyCreate`
- * listener, so the body, karma, the logger and the role-reveal message all see the same killer
- * rather than only the corpse being repaired.
+ * Here the pending entry is consumed at the top of `onDeathPre` instead of in a `bodyCreate`
+ * listener, so the kill feed, the body, karma, the logger and the role-reveal message all see the
+ * same killer rather than only the corpse being repaired.
+ *
+ * `cs2/pawn.ts` carries a second, killer-only table (`attributeNextDeath`) for callers that cannot
+ * import this module without closing a cycle through `handlers.ts`. `onDeathPre` consumes both and
+ * prefers this one, which is the only one that can also carry a weapon name and the no-corpse flag.
  */
 const pendingKiller = new Int32Array(MAX_SLOTS).fill(-1);
 const pendingWeapon = new Array<string>(MAX_SLOTS).fill("");
@@ -558,18 +557,58 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
   // Cheap idempotent guard; see `installMatchStats` for why the install is not left to the caller.
   installMatchStats(bus);
 
-  const killer = ev.getPlayerSlot("attacker");
+  // What the ENGINE reported. Kept separate from the repaired `killer` below — see
+  // `rollbackDeathStats` for why the stat bookkeeping must run off this one and not off that one.
+  const engineKiller = ev.getPlayerSlot("attacker");
   const assister = ev.getPlayerSlot("assister");
 
   // UNCONDITIONAL, above the round-state gate — the C# calls `hideAndTrackStats` before its own
   // `State.IN_PROGRESS` early-return because the engine has already written these columns by the
   // time a pre-hook runs, and suppressing the broadcast does not undo them.
-  rollbackDeathStats(victim, killer, assister, ev.getInt("dmg_health"));
+  rollbackDeathStats(victim, engineKiller, assister, ev.getInt("dmg_health"));
 
   if (!inProgress()) return;
 
   const weapon = ev.getString("weapon");
   const headshot = ev.getBool("headshot");
+
+  // Read-and-clear BOTH pending tables, whichever one ends up being used: a mark is written
+  // speculatively, immediately before the lethal health write, so one that never converted into the
+  // death it was written for (the write was absorbed by invulnerability, the pawn was already gone,
+  // a `damage` listener cancelled the tick) must not survive to eat a later, unrelated death.
+  const marked = pendingKiller[victim]!;
+  const markedWeapon = pendingWeapon[victim]!;
+  const markedNoBody = pendingNoBody[victim] === 1;
+  clearGadgetKill(victim);
+  const attributed = takeAttributedKiller(victim);
+
+  let killer = engineKiller;
+  let cause = weapon;
+  let noBody = false;
+  // Repair the attribution here, ABOVE the kill-feed refire, rather than deep inside `handleDeath`:
+  // the feed, the corpse, karma, the logger, the role-reveal message and the DNA Scanner then all
+  // name the same killer off this one real death event. Nothing has to emit a second, synthetic
+  // `death` to correct itself afterwards — and a second emit would double-fire every subscriber
+  // (`special/rounds.ts` speedOnKill has no killer === victim guard).
+  //
+  // Only when the engine named nobody: a gadget kill reaches it as `pawn.slay()`, which reports the
+  // victim as their own attacker. That is the C#'s
+  // `if (ev.Body.Killer == null || ev.Body.Killer.Id == ev.Body.OfPlayer.Id)`, and
+  // `PoisonSmokeListener.OnRagdollSpawn` (PoisonSmokeListener.cs:141-144) cancels body creation
+  // under exactly the same test — which is why `noBody` is read INSIDE this branch and not on its
+  // own. Read unconditionally, a stale mark would silently swallow the corpse of a death it had
+  // nothing to do with, and a corpse nobody can find keeps the victim spoofed alive all round.
+  if (killer < 0 || killer === victim) {
+    if (marked >= 0) {
+      killer = marked;
+      if (markedWeapon !== "") cause = markedWeapon;
+      noBody = markedNoBody;
+    } else if (attributed >= 0 && attributed !== victim) {
+      // `pawn.attributeNextDeath` — the killer-only table, for the callers that cannot import this
+      // module without closing a cycle through `handlers.ts`.
+      killer = attributed;
+    }
+  }
 
   // Re-fire to the recipients who are allowed to see it, before we suppress the broadcast.
   // The C# guards on `ev.Attacker != null` only, so a suicide still reaches the victim's own feed.
@@ -618,12 +657,17 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
     }
   }
 
-  handleDeath(bus, victim, killer, assister, weapon, headshot);
+  handleDeath(bus, victim, killer, assister, cause, headshot, noBody);
   // Suppress the public broadcast: nobody else learns this player died.
   return HookResult.Handled;
 }
 
-/** Apply the TTT consequences of a death: body, alive-spoof, events, win check. */
+/**
+ * Apply the TTT consequences of a death: body, alive-spoof, events, win check.
+ *
+ * `killer`/`weapon` are the values `onDeathPre` already resolved — the gadget repair happens up
+ * there so that the kill feed sees the same answer this does. `noBody` is the Poison Smoke rule.
+ */
 function handleDeath(
   bus: EventBus<TttEvents>,
   victim: number,
@@ -631,36 +675,20 @@ function handleDeath(
   assister: number,
   weapon: string,
   headshot: boolean,
+  noBody: boolean,
 ): void {
-  let source = killer;
-  let cause = weapon;
-  // A gadget kill arrives with no attacker (it is a bare health write). Take the entry the item
-  // recorded on the lethal tick, but only when the engine did not name a real killer — the C#
-  // rewrites the corpse's killer only `if (ev.Body.Killer == null || == OfPlayer)`.
-  if (source < 0 || source === victim) {
-    const pending = pendingKiller[victim]!;
-    if (pending >= 0) {
-      source = pending;
-      if (pendingWeapon[victim] !== "") cause = pendingWeapon[victim]!;
-    }
-  }
-  // Poison Smoke leaves no corpse: the C# cancels body creation for its victims. Skipping the spawn
-  // outright is the same outcome and leaves nothing half-registered — a body removed after the fact
-  // stays in the tracker's arrays (`removeBody` is private to bodies.ts) and remains findable by the
-  // proximity fallback as an invisible corpse.
-  const noBody = pendingNoBody[victim] === 1;
-  clearGadgetKill(victim);
-
   const role = reg.roleOf(victim);
+  // Poison Smoke leaves no corpse: the C# cancels body creation for its victims. Skipping the spawn
+  // outright is the same outcome and leaves nothing half-registered.
   const body = noBody
     ? null
     : spawnBody(
         victim,
         reg.nameOf(victim),
         role,
-        source,
-        source >= 0 ? reg.nameOf(source) : "",
-        cause,
+        killer,
+        killer >= 0 ? reg.nameOf(killer) : "",
+        weapon,
         Server.gameTime,
       );
 
@@ -672,19 +700,22 @@ function handleDeath(
 
   if (body !== null) {
     const created = bus.emit("bodyCreate", { body, canceled: false });
-    if (created.canceled) body.ref.remove();
+    // `removeBody`, not a bare `body.ref.remove()`: dropping the entity alone leaves the record in
+    // the tracker's arrays, where `nearestBody` keeps handing it out as an invisible corpse that
+    // can still be "identified".
+    if (created.canceled) removeBody(body);
   }
 
-  logDeath(victim, source, cause);
+  logDeath(victim, killer, weapon);
 
-  if (source >= 0 && source !== victim) {
-    const killerRole = reg.roleOf(source);
+  if (killer >= 0 && killer !== victim) {
+    const killerRole = reg.roleOf(killer);
     if (killerRole !== RoleId.None) {
       tell(victim, msg("ROLE_REVEAL_DEATH", roleName(killerRole)));
     }
   }
 
-  bus.emit("death", { slot: victim, killer: source, assister, weapon: cause, headshot });
+  bus.emit("death", { slot: victim, killer, assister, weapon, headshot });
   checkEndConditions();
 }
 
@@ -770,8 +801,11 @@ export function onPlayerHurt(bus: EventBus<TttEvents>, gev: GameEvent): void {
 /** `player_spawn`: refresh liveness and drop the stale pawn-index cache. */
 export function onSpawn(slot: number): void {
   invalidatePawnCache();
-  // Any pending gadget attribution belonged to the life that just ended.
+  // Any pending gadget attribution belonged to the life that just ended. `clearAttributedKills` has
+  // no per-slot form, but a respawn is either the round boundary (where clearing everything is
+  // exactly right) or an admin action, and a stale attribution is worse than a dropped one.
   clearGadgetKill(slot);
+  clearAttributedKills();
   refreshInvulnerability(slot);
   // A fresh pawn starts opaque — clears the death-hide and any camouflage from last round.
   resetPawnColor(slot);

@@ -14,7 +14,7 @@
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Vector, forwardVector } from "@s2script/sdk/math";
 import { Server } from "@s2script/sdk/server";
-import type { EntityRef } from "@s2script/sdk/entity";
+import { Entity, type EntityRef } from "@s2script/sdk/entity";
 import { Beam, type BeamHandle } from "@s2script/cs2";
 import { Button, GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { cfg } from "../core/cvars";
@@ -24,6 +24,7 @@ import type { TttEvents } from "../core/events";
 import { pawnOf } from "./pawn";
 import { bodyByEntity, nearestBody, type Body } from "./bodies";
 import { hasBodyPaint, spendBodyPaint, spendGlove, hasGloves, tryDefuseTripwire } from "../shop/effects";
+import { readDna } from "../shop/weaponfx";
 import { inProgress } from "../game/game";
 
 /** How far a player can reach to identify a body, squared. */
@@ -63,23 +64,58 @@ const holdDistance = new Float32Array(MAX_SLOTS);
 /** Whether USE was down last tick, so we only act on the press edge for identification. */
 const usePressed = new Uint8Array(MAX_SLOTS);
 
+/**
+ * Entity indices of this round's `prop_physics_multiplayer` props — the port of `onStartUse`'s
+ * `TryGetHitEntityByDesignerName("prop_physics_multiplayer")` test.
+ *
+ * `EntityRef` exposes no classname, so the designer-name filter has to be turned inside out: the
+ * class is resolved once, in bulk, and the trace hit is then a set membership test. Rebuilt at the
+ * IN_PROGRESS transition rather than on map start because the engine's round restart re-creates
+ * map-placed entities, and never per trace — `tryPickup` runs every frame a player holds USE.
+ */
+const physicsProps = new Set<number>();
+
 let bus: EventBus<TttEvents>;
 
 /** Wire the interaction layer to the bus. */
 export function initInteract(eventBus: EventBus<TttEvents>): void {
   bus = eventBus;
 
-  // Drop everything the moment the round stops running. `tickInteract` is only driven while the
-  // round is IN_PROGRESS, so nothing would otherwise call `release` again: a player still holding a
-  // corpse at round end would keep its beam in the world (and the prop its frozen physics) until
-  // the map changed, and the corpse itself is destroyed out from under them a moment later.
   bus.on(
     "gameState",
     (ev) => {
-      if (ev.state !== GameState.InProgress) resetInteract();
+      if (ev.state === GameState.InProgress) {
+        indexPhysicsProps();
+        return;
+      }
+      // Drop everything the moment the round stops running. `tickInteract` is only driven while the
+      // round is IN_PROGRESS, so nothing would otherwise call `release` again: a player still
+      // holding a corpse at round end would keep its beam in the world (and the prop its frozen
+      // physics) until the map changed, and the corpse itself is destroyed out from under them a
+      // moment later.
+      resetInteract();
     },
     { ignoreCanceled: true },
   );
+
+  // A disconnecting carrier never reaches `release` on its own: `tickInteract` walks
+  // `reg.activeSlots()`, which drops the slot the instant the client goes. That used to leak only a
+  // dangling ref; with the beam and DisableMotion it strands a rendered env_beam in the world and a
+  // permanently frozen prop, and — worse — leaves `carrying[slot]` live for whoever takes the slot
+  // next, who would teleport the previous occupant's corpse across the map on their first USE. The
+  // C# leak was keyed by controller, so it could not be inherited; a slot-indexed port must clear.
+  bus.on("leave", (ev) => {
+    release(ev.slot);
+    usePressed[ev.slot] = 0;
+    holdDistance[ev.slot] = 0;
+  });
+}
+
+/** Snapshot the round's carryable physics props. See {@link physicsProps}. */
+function indexPhysicsProps(): void {
+  physicsProps.clear();
+  const props = Entity.findByClass("prop_physics_multiplayer");
+  for (let i = 0; i < props.length; i++) physicsProps.add(props[i]!.index);
 }
 
 /**
@@ -152,6 +188,14 @@ function interactOnce(slot: number): void {
  * and Gloves let a Traitor move a body without triggering identification at all.
  */
 function identify(slot: number, body: Body): void {
+  // The DNA read is a SIBLING of identification in the C# (`DnaListener` subscribes to the same
+  // `PropPickupEvent`), not a consequence of it: it fires on an already-identified body, on your own
+  // body and on a body being moved with Gloves — so it goes above every gate below. (The C# also
+  // read out of round; here `tickInteract` only runs while the round is live, so that case cannot
+  // arise either way.) The one visible difference is chat ordering: `DnaListener` is Priority.LOW,
+  // so the C# printed the scan AFTER the identification announcement, and this prints it before.
+  readDna(slot, body);
+
   if (body.identified) return;
   if (body.owner === slot) return; // you cannot find your own corpse
   if (!inProgress()) return;
@@ -175,12 +219,26 @@ function identify(slot: number, body: Body): void {
   body.identified = true;
 }
 
-/** Start carrying whatever physics prop the player is looking at. */
+/**
+ * Start carrying the physics prop or corpse the player is looking at.
+ *
+ * `onStartUse` resolved its trace hit through `TryGetHitEntityByDesignerName("prop_ragdoll")` and
+ * then `("prop_physics_multiplayer")` and bailed on `hitEntity == null` — nothing else in the world
+ * was ever pickable. That filter is reproduced here rather than trusting the trace: without it,
+ * standing within 200u of another player with USE held DisableMotion's their pawn, strings a beam to
+ * it and teleports them in front of you every frame, and the same goes for a func_ brush, a dropped
+ * weapon or a hostage.
+ */
 function tryPickup(slot: number): void {
   const pawn = pawnOf(slot);
   if (pawn === null) return;
   const hit = pawn.aimTrace({ distance: 200, mask: TraceMask.ShotPhysics });
   if (hit === null || !hit.didHit || hit.entity === null) return;
+
+  // The body tracker is the real "is this a prop_ragdoll?" test — every corpse in the mode is one it
+  // spawned — and {@link physicsProps} stands in for the second designer-name lookup.
+  const index = hit.entity.index;
+  if (bodyByEntity(index) === undefined && !physicsProps.has(index)) return;
 
   const origin = pawn.origin;
   if (origin === null) return;
@@ -310,4 +368,7 @@ export function resetInteract(): void {
   for (let slot = 0; slot < MAX_SLOTS; slot++) release(slot);
   usePressed.fill(0);
   holdDistance.fill(0);
+  // Entity indices are recycled, so a snapshot must not outlive the round it was taken in — it is
+  // rebuilt at the next IN_PROGRESS transition, which is the only state `tryPickup` reads it from.
+  physicsProps.clear();
 }
