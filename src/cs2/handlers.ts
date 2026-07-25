@@ -108,7 +108,7 @@ export function installBombSuppressor(): void {
   } catch (e) {
     // `onPre` throws at subscribe time on a name this build cannot resolve. Say so — swallowing it
     // silently reopens the role leak this module exists to plug.
-    console.warn(`[ttt] radio suppression unavailable: ${String(e)}`);
+    console.log(`[ttt] WARN: radio suppression unavailable: ${String(e)}`);
   }
 }
 

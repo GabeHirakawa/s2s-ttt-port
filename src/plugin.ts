@@ -91,7 +91,7 @@ function loadPhraseOverrides(): void {
   if (name === "") return;
   const raw = config.readFile(name);
   if (raw === null) {
-    console.warn(`[ttt] phrases_file "${name}" not found in the configs directory`);
+    console.log(`[ttt] WARN: phrases_file "${name}" not found in the configs directory`);
     return;
   }
   try {
@@ -99,7 +99,7 @@ function loadPhraseOverrides(): void {
     if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
     setPhrases(parsed as Record<string, string>);
   } catch (err) {
-    console.error(`[ttt] phrases_file "${name}" is not valid JSON: ${String(err)}`);
+    console.log(`[ttt] ERROR: phrases_file "${name}" is not valid JSON: ${String(err)}`);
   }
 }
 

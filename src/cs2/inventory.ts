@@ -43,7 +43,7 @@ export function weaponClass(w: HeldWeapon | null | undefined): string {
       typeof w.className === "string" ? "className"
       : typeof w.designerName === "string" ? "designerName"
       : "";
-    if (classKey === "") console.warn("[ttt] weapon class name unavailable on this SDK build");
+    if (classKey === "") console.log("[ttt] WARN: weapon class name unavailable on this SDK build");
   }
   if (classKey === "") return "";
   return (w[classKey] as string | null | undefined) ?? "";

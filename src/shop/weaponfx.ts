@@ -146,7 +146,7 @@ export function installFireHook(): void {
       return HookResult.Handled;
     });
   } catch {
-    console.warn("[ttt] fire-bullets message unavailable: Silent AWP and Suppressed are inert");
+    console.log("[ttt] WARN: fire-bullets message unavailable: Silent AWP and Suppressed are inert");
   }
 }
 

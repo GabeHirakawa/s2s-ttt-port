@@ -131,7 +131,7 @@ export function spawnBody(
   const ragdoll = createEntity("prop_ragdoll");
   if (ragdoll === null) return null;
 
-  if (!ragdoll.setModel(model)) console.warn(`[ttt] corpse model rejected: ${model}`);
+  if (!ragdoll.setModel(model)) console.log(`[ttt] WARN: corpse model rejected: ${model}`);
   if (!ragdoll.spawn({ targetname: `ttt_body_${slot}` })) {
     ragdoll.remove();
     return null;

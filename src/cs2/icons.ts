@@ -259,7 +259,7 @@ function restrictIcons(slot: number, viewers: readonly number[]): void {
     if (Transmit.setVisibleTo(ent, viewers)) continue;
     if (!warnedNoTransmit) {
       warnedNoTransmit = true;
-      console.warn("[ttt] transmit filtering unavailable — hiding role icons instead of leaking them");
+      console.log("[ttt] WARN: transmit filtering unavailable — hiding role icons instead of leaking them");
     }
     removeIcons(slot);
     return;
@@ -293,7 +293,7 @@ function refreshTraitorIcons(): void {
 /** Force `slot` onto the role uniform. Deferred by the caller — see `applyRoleVisuals`. */
 function applyRoleModel(pawn: Pawn, role: RoleId): void {
   const model = role === RoleId.Detective ? MODEL_CT : MODEL_T;
-  if (!pawn.ref.setModel(model)) console.warn(`[ttt] role model rejected: ${model}`);
+  if (!pawn.ref.setModel(model)) console.log(`[ttt] WARN: role model rejected: ${model}`);
 }
 
 /**

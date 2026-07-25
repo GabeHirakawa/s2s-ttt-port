@@ -54,6 +54,15 @@ export const enum Button {
   Reload = 1 << 13,
 }
 
+/**
+ * NOTE ON LOGGING: use `console.log` ONLY.
+ *
+ * The SDK's `globals.d.ts` advertises `console.warn`/`error`/`info`, but the injected sandbox
+ * console implements just `log` — calling the others throws `TypeError: console.warn is not a
+ * function` at runtime, and because it throws from inside a command or event handler it takes that
+ * handler down with it. Tag severity in the message text instead.
+ */
+
 /** The maximum player slots the engine addresses. Every per-player array is sized to this. */
 export const MAX_SLOTS = 64;
 

@@ -237,8 +237,7 @@ function readStat(p: Player, field: number): number | null {
 /** Give up on the raw path for the rest of the session, saying why exactly once. */
 function disableStats(why: string): void {
   statsMode = StatsMode.Disabled;
-  console.warn(
-    `[ttt] scoreboard stat hiding is OFF: ${why}. ` +
+  console.log(`[ttt] WARN: scoreboard stat hiding is OFF: ${why}. ` +
       `Supply the correct offsets in "${OFFSETS_FILE}" ({"actionTracking":N,"matchStats":N}).`,
   );
 }
@@ -258,7 +257,7 @@ function loadOffsetOverrides(): void {
     }
     if (typeof ms === "number" && ms >= 0) matchStatsOff = ms;
   } catch (err) {
-    console.error(`[ttt] ${OFFSETS_FILE} is not valid JSON: ${String(err)}`);
+    console.log(`[ttt] ERROR: ${OFFSETS_FILE} is not valid JSON: ${String(err)}`);
   }
 }
 
