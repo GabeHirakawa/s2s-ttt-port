@@ -75,8 +75,6 @@ import { pawnOf } from "./pawn";
  * so both uniforms use the same prefix. An unresolvable path yields an error model, which is worse
  * than leaving the player's own agent alone — hence the rejection warning.
  */
-const MODEL_T = "characters/models/tm_phoenix/tm_phoenix.vmdl";
-const MODEL_CT = "characters/models/ctm_fbi/ctm_fbi_varianth.vmdl";
 
 /** Height above the pawn origin the hat floats at (`TextSpawner.spawnHatPart`). */
 const HAT_HEIGHT = 72;
@@ -112,12 +110,22 @@ const realNames: string[] = new Array<string>(MAX_SLOTS).fill("");
 /** Warn once rather than every frame if the transmit capability is not available on this runtime. */
 let warnedNoTransmit = false;
 
-/** Register the role uniforms for the current map. Call from `ctx.server.onPrecache`. */
+/**
+ * Role-uniform player models are NOT applied.
+ *
+ * The C# `RoleIconsHandler` swapped each player's agent for a role uniform. Doing the same here
+ * left every player as the pink-and-black ERROR model the moment roles were dealt: the engine
+ * reported `RESOURCE_TYPE_MODEL ... requested but not resident (Missing from a manifest?)`, i.e.
+ * `pc.add()` during the precache window is not enough to make an arbitrary character model
+ * available to `setModel` on this build — and `setModel` returns true anyway, so there is no
+ * failure to fall back from.
+ *
+ * Players keep their own agent. That is purely cosmetic: the role signal players actually read is
+ * the icon above the head and the team column, both of which are unaffected.
+ */
 export function precacheRoleModels(pc: PrecacheContext): void {
-  pc.add(MODEL_T);
-  pc.add(MODEL_CT);
+  void pc;
 }
-
 /**
  * The letter to float over the head — the C# took the first ASCII letter of the *localised* role
  * name, so a phrase-file override changes the marker with it. A non-Latin phrase table has no
@@ -290,12 +298,6 @@ function refreshTraitorIcons(): void {
   }
 }
 
-/** Force `slot` onto the role uniform. Deferred by the caller — see `applyRoleVisuals`. */
-function applyRoleModel(pawn: Pawn, role: RoleId): void {
-  const model = role === RoleId.Detective ? MODEL_CT : MODEL_T;
-  if (!pawn.ref.setModel(model)) console.log(`[ttt] WARN: role model rejected: ${model}`);
-}
-
 /**
  * Apply the uniform and the icon, one frame after the role was dealt.
  *
@@ -315,7 +317,6 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
       return;
     }
 
-    applyRoleModel(pawn, role);
 
     // Model first, panels second: a model swap rebuilds the skeleton the panels hang off.
     // Innocents get no panels until something reveals them — see the header.

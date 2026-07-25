@@ -30,7 +30,7 @@ import { pawnOf } from "./pawn";
  * for.
  */
 const MODEL_T = "characters/models/tm_phoenix/tm_phoenix.vmdl";
-const MODEL_CT = "characters/models/ctm_fbi/ctm_fbi_varianth.vmdl";
+const MODEL_CT = "characters/models/ctm_sas/ctm_sas.vmdl";
 
 /** A dead player's corpse. */
 export interface Body {
