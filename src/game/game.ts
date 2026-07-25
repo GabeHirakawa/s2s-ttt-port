@@ -47,6 +47,20 @@ let bus: EventBus<TttEvents>;
 /** Monotonic token invalidating in-flight timers when the round moves on. */
 let epoch = 0;
 
+/**
+ * One-shot: set when the ENGINE ended (or restarted) the round instead of TTT. Consumed by the next
+ * {@link endGame}, which then skips its own `terminateRound` — the engine's restart is already in
+ * flight and a second terminate landing on top of it cuts the round that is starting short.
+ */
+let engineEndedRound = false;
+
+/**
+ * Seconds to wait past the round-end terminate for the engine's `round_start` before giving up on
+ * it. The terminate asks for a 3s pre-restart delay, so anything beyond this is a stuck round
+ * rather than a slow one.
+ */
+const FINISHED_TIMEOUT = 10;
+
 /** Wire the module to the plugin's bus. Call once from the factory. */
 export function initGame(eventBus: EventBus<TttEvents>): void {
   bus = eventBus;
@@ -130,6 +144,12 @@ export function startGame(quiet = false): void {
   GameRules.get()?.setTimeRemaining(cfg.countdownSeconds + 5);
   Server.command("mp_ignore_round_win_conditions 1");
 
+  // Put everyone back on T as the countdown OPENS, not just from the 1 Hz countdown ticker: last
+  // round's revealed Innocents are still sitting on CT, and the ticker is not guaranteed to run
+  // before roles are dealt (a one-second countdown, or a frame the shared handler dropped because
+  // `dt > 1`). Whoever joins or gets revealed later is caught by the ticker as before.
+  resetTeamsToT();
+
   // Everyone on a playing team but currently dead gets put back in play for the coming round.
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
@@ -165,14 +185,21 @@ function beginRound(): void {
   // `assignRoles` consumes `pool` in place (swap-and-pop); that is fine, it is rebuilt each round.
   game.participants = assignRoles(bus, pool);
 
+  // Arm the default round clock BEFORE the InProgress dispatch, not after. `setState` runs its
+  // listeners synchronously, and one of them (the Speed special round) re-arms the deadline with a
+  // much shorter clock from inside that dispatch. Arming afterwards would bump `epoch` again and
+  // silently replace Speed's timer with the full-length one — the announcement would fire and the
+  // round would then play out as a normal one. The C# hit the same race deliberately from the other
+  // side: `SpeedRound.ApplyRoundEffects` disposed `RoundTimerListener.EndTimer` and scheduled its
+  // own, so whoever arms last wins and it made sure that was Speed.
+  setRoundDeadline(roundDuration(game.participants));
+
   if (!setState(GameState.InProgress)) return;
 
   const traitors = reg.aliveCount(RoleId.Traitor);
   const nonTraitors = game.participants - traitors;
   tellAll(msg("GAME_STATE_STARTED", traitors === 1 ? "is" : "are", traitors, nonTraitors));
   revealTraitorBuddies();
-
-  setRoundDeadline(roundDuration(game.participants));
 }
 
 /**
@@ -232,6 +259,12 @@ export function checkEndConditions(): boolean {
 export function endGame(winner: RoleId, reason?: string): void {
   if (game.state !== GameState.InProgress && game.state !== GameState.Countdown) return;
 
+  // Consume the flag here rather than reading it from the timer below, and consume it even if the
+  // transition is vetoed: a flag left standing would suppress the terminate of some later round
+  // that TTT itself decided.
+  const engineDriven = engineEndedRound;
+  engineEndedRound = false;
+
   game.winner = winner;
   epoch++; // invalidate the round timer
   if (!setState(GameState.Finished)) return;
@@ -255,10 +288,52 @@ export function endGame(winner: RoleId, reason?: string): void {
   const mine = ++epoch;
   void delay(cfg.timeBetweenRounds * 1000).then(() => {
     if (mine !== epoch) return;
+    // When the ENGINE ended this round its own restart is already pending (mp_round_restart_delay),
+    // so terminating again here would cut the restarting round short a second or two in.
+    if (engineDriven) return;
     Server.command("mp_ignore_round_win_conditions 1");
     GameRules.terminateRound(endReason, 3);
     Server.command("mp_ignore_round_win_conditions 0");
   });
+
+  // Watchdog on FINISHED. Nothing inside TTT drives the round forward from here: the next round is
+  // started by the engine's `round_start` landing after the terminate above, and FINISHED is the
+  // one state no ticker services (`tickWaiting` and `tickCountdown` both bail on it). If that
+  // restart never arrives — a terminate the engine dropped, an admin freezing the round, a map
+  // running its own round logic — the mode deadlocks with everyone stood in the end-of-round
+  // reveal forever. Fall back to WAITING and let the idle poller take it from there.
+  void delay((cfg.timeBetweenRounds + FINISHED_TIMEOUT) * 1000).then(() => {
+    // Any legitimate restart moves the state on (and `startGame` bumps `epoch`), so a live token
+    // AND a still-FINISHED state together mean the restart really is never coming.
+    if (mine !== epoch || game.state !== GameState.Finished) return;
+    returnToWaiting();
+  });
+}
+
+/**
+ * The ENGINE ended the round rather than TTT — an admin `endround`/`mp_restartgame`, a
+ * `Game_Commencing`, a map entity, or an operator config that cleared
+ * `mp_ignore_round_win_conditions` and let a win condition through.
+ *
+ * The engine treats its own round end as final and restarts the round, respawning everyone: the
+ * dead come back with last round's roles, corpses stay on the ground, and the alive counters the
+ * win check reads stop converging — the round would hang until the deadline timer fired minutes
+ * later. So TTT folds its round up behind the engine, exactly as `RoundEnd_GameEndHandler` did
+ * (whose `FinishedAt == null` test is this function's state guard: an end TTT caused itself has
+ * already moved the state off InProgress by the time the engine's `round_end` lands).
+ */
+export function onEngineRoundEnd(): void {
+  if (game.state !== GameState.InProgress) return;
+  engineEndedRound = true;
+  endGame(RoleId.Innocent);
+}
+
+/** Drop back to WAITING and queue the next round if the server is populated enough for one. */
+function returnToWaiting(): void {
+  game.state = GameState.Waiting;
+  syncRosterAndAnnounce();
+  reg.resyncAlive();
+  if (reg.playerCount() >= cfg.minPlayers) startGame();
 }
 
 /**
@@ -284,12 +359,20 @@ function revealRoles(): void {
  * are present, immediately queues the next TTT round.
  */
 export function onEngineRoundStart(): void {
-  if (game.state === GameState.Finished || game.state === GameState.Waiting) {
-    game.state = GameState.Waiting;
-    syncRosterAndAnnounce();
-    reg.resyncAlive();
-    if (reg.playerCount() >= cfg.minPlayers) startGame();
+  // A `round_start` arriving while TTT still has a live round is proof the engine restarted it out
+  // from under us, and it covers the restarts that never fire `round_end` at all. Everyone has just
+  // been respawned with last round's roles, so the round cannot be salvaged — fold it up the way an
+  // engine round end would, suppressing the follow-up terminate since the restart already happened.
+  if (game.state === GameState.InProgress) {
+    engineEndedRound = true;
+    endGame(RoleId.Innocent);
   }
+
+  // FINISHED (including the end just above) or an idle WAITING: a fresh engine round, so reset and
+  // queue the next TTT one. A COUNTDOWN is deliberately left to run — its 1 Hz ticker already
+  // respawns, re-teams and re-syncs liveness every second, so an engine restart underneath it
+  // resolves itself without throwing the countdown away.
+  if (game.state === GameState.Finished || game.state === GameState.Waiting) returnToWaiting();
 }
 
 /**
@@ -346,11 +429,15 @@ export function tickWaiting(dt: number): void {
 
 /** A map changed under us: abandon any live round. */
 export function onMapChange(): void {
-  epoch++;
   game.roundsThisMap = 0;
   clearBodies(false);
   if (game.state === GameState.InProgress || game.state === GameState.Countdown) {
     endGame(RoleId.None, "Map Change");
   }
   game.state = GameState.Waiting;
+  // Bump LAST, not first. `endGame` arms its own timers (the round-end terminate and the FINISHED
+  // watchdog) against a fresh token, so a bump taken before it invalidates only the timers of the
+  // round that is already over and leaves those two live — they would then fire into the new map,
+  // terminating its opening round a second after it loads and forcing a round start on top.
+  epoch++;
 }

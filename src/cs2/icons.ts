@@ -1,0 +1,498 @@
+/**
+ * In-world role markers, role uniforms and the scoreboard role tag — the port of
+ * `CS2/GameHandlers/RoleIconsHandler`, `CS2/Hats/TextSpawner` + `CS2/Hats/TextSetting`, and the
+ * `PlayerExtensions.SetClan` calls in `BodyPickupListener` / `RoundTimerListener.revealRoles`.
+ *
+ * Three separate identification channels the original had and this port did not:
+ *
+ *  1. **A floating letter above the head.** Two `point_worldtext` panels parented to the pawn,
+ *     showing the first letter of the role name in the role colour. The Detective's blue "D" is
+ *     visible to everyone; a Traitor's red "T" only to the other Traitors. This is how Traitors
+ *     recognise each other mid-firefight and how anyone finds the Detective at a glance — without
+ *     it a Traitor has only the one-shot buddy list `revealTraitorBuddies` prints at round start.
+ *  2. **A role uniform.** Everyone wears the same model (Detective aside), so a silhouette carries
+ *     no information about *who* you are looking at — only about their role.
+ *  3. **A scoreboard role tag.** "Detective" for the whole round, the real role once a corpse is
+ *     identified, and everyone's role at round end.
+ *
+ * ## The visibility model is transposed, not reimplemented
+ *
+ * The C# kept a per-VIEWER `ulong[64]` bitmask and stripped entities out of `TransmitEntities` in a
+ * `CheckTransmit` listener — JS (well, C#) running per client per snapshot. s2script exposes the
+ * same filter declaratively and per-ENTITY: `Transmit.setVisibleTo(icon, viewers)`. That is the
+ * exact transpose of the bitmask, and the engine enforces it with nothing of ours in the snapshot
+ * path. Two consequences worth knowing:
+ *
+ *  - *No rule at all* means "visible to everyone", so the Detective icon and a Stickers reveal
+ *    install NO rule (`Transmit.reset`) rather than enumerating the connected slots. That matches
+ *    the C#, which OR'd the bit into all 64 masks including slots nobody occupied yet — a player
+ *    who connects mid-round still sees them.
+ *  - A rule that fails to install would leave an icon visible to everyone, which for a Traitor is
+ *    worse than having no icon at all. Every restricted icon is therefore FAIL-CLOSED: if the rule
+ *    is refused (capability unavailable), the icon is destroyed instead.
+ *
+ * ## Deliberate deviations
+ *
+ *  - **Innocent icons are spawned lazily.** The C# spawned an "I" panel for every Innocent and then
+ *    put it in nobody's mask — two permanently invisible entities per Innocent, i.e. most of the
+ *    server. Here an Innocent only gets panels if something reveals them (Stickers), which is
+ *    player-visibly identical and halves the entity count in the common case.
+ *  - **`m_szClan` is not in the s2script schema** and there is no `setClan`, so the scoreboard tag
+ *    rides `Player.setName` as a `"[D] "` prefix. Unlike the clan column a name prefix is also
+ *    visible in the kill feed and in engine-generated text; the plugin's own chat lines are
+ *    unaffected because they read the cached `reg.nameOf`. The real name is cached here before the
+ *    first prefix is written and restored at the next countdown — which is BEFORE `beginRound`
+ *    refreshes the registry's name cache, so a prefixed name can never be re-cached as the real one.
+ *  - **Only this plugin's own worldtext is destroyed** at round start. The C# killed every
+ *    `point_worldtext` on the map, which would take a map's own signage with it.
+ */
+
+import { Player, type Pawn } from "@s2script/cs2";
+import { createEntity, type EntityRef } from "@s2script/sdk/entity";
+import type { PrecacheContext } from "@s2script/sdk/sound";
+import { nextFrame } from "@s2script/sdk/timers";
+import { Transmit } from "@s2script/sdk/transmit";
+import { Priority, type EventBus } from "../core/bus";
+import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
+import type { TttEvents } from "../core/events";
+import * as reg from "../core/registry";
+import { inProgress } from "../game/game";
+import { roleName } from "../game/roles";
+import { ROLE_COLORS, type Rgb } from "./color";
+import { pawnOf } from "./pawn";
+
+/**
+ * Role uniforms.
+ *
+ * The C# paths were `agents/models/...`, which is the pre-CS2 layout; the port already ships
+ * `characters/models/tm_phoenix/tm_phoenix.vmdl` for corpses and that one is exercised at runtime,
+ * so both uniforms use the same prefix. An unresolvable path yields an error model, which is worse
+ * than leaving the player's own agent alone — hence the rejection warning.
+ */
+const MODEL_T = "characters/models/tm_phoenix/tm_phoenix.vmdl";
+const MODEL_CT = "characters/models/ctm_fbi/ctm_fbi_varianth.vmdl";
+
+/** Height above the pawn origin the hat floats at (`TextSpawner.spawnHatPart`). */
+const HAT_HEIGHT = 72;
+/** Sideways nudge along the hat's own right vector, so the two panels do not z-fight. */
+const HAT_SIDE_OFFSET = 5;
+/** The two yaw offsets the original spawned its panels at. */
+const HAT_YAWS: readonly number[] = [270, 180];
+
+/**
+ * Both worldtext panels for every slot, flat: `slot * 2 + part`. Flat rather than nested so it
+ * stays the slot-indexed shape the rest of the plugin uses, with no per-slot sub-array to allocate.
+ */
+const icons: (EntityRef | null)[] = new Array<EntityRef | null>(MAX_SLOTS * 2).fill(null);
+
+/**
+ * Slots holding a Traitor icon this round — the transpose of `traitorsThisRound`. It only grows
+ * (the C# never removed a dead Traitor either; their icon is destroyed on death, so a stale viewer
+ * entry has nothing to reveal).
+ */
+const traitors: number[] = [];
+
+/** Slots whose icon has been permanently revealed (Stickers) — a later refresh must not re-hide it. */
+const revealed = new Uint8Array(MAX_SLOTS);
+
+/** Slots that bought Stickers this round (the C# `Shop.HasItem<Stickers>` test). */
+const stickers = new Uint8Array(MAX_SLOTS);
+
+/** Slots currently wearing a role tag on their name, and the real name to put back. */
+const tagged = new Uint8Array(MAX_SLOTS);
+const realNames: string[] = new Array<string>(MAX_SLOTS).fill("");
+
+/** Warn once rather than every frame if the transmit capability is not available on this runtime. */
+let warnedNoTransmit = false;
+
+/** Register the role uniforms for the current map. Call from `ctx.server.onPrecache`. */
+export function precacheRoleModels(pc: PrecacheContext): void {
+  pc.add(MODEL_T);
+  pc.add(MODEL_CT);
+}
+
+/**
+ * The letter to float over the head — the C# took the first ASCII letter of the *localised* role
+ * name, so a phrase-file override changes the marker with it. A non-Latin phrase table has no
+ * ASCII letter to take, in which case the first character is a better marker than nothing.
+ */
+function iconLetter(role: RoleId): string {
+  const name = roleName(role);
+  for (let i = 0; i < name.length; i++) {
+    const c = name.charCodeAt(i);
+    if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) return name.charAt(i);
+  }
+  return name.length > 0 ? name.charAt(0) : "?";
+}
+
+/**
+ * One panel of a hat — the port of `TextSpawner.spawnHatPart`.
+ *
+ * The 5-unit nudge is along the panel's OWN right vector (`VectorExtensions.ToRight` on the
+ * already-rotated angle), which with the +90 roll works out to a horizontal offset opposite the
+ * panel's facing — that is what separates the yaw+270 and yaw+180 panels around the head.
+ */
+function spawnHatPart(
+  pawn: Pawn,
+  ox: number,
+  oy: number,
+  oz: number,
+  pitch: number,
+  yaw: number,
+  roll: number,
+  text: string,
+  c: Rgb,
+): EntityRef | null {
+  const rad = Math.PI / 180;
+  const sp = Math.sin(pitch * rad);
+  const cp = Math.cos(pitch * rad);
+  const sy = Math.sin(yaw * rad);
+  const cy = Math.cos(yaw * rad);
+  const sr = Math.sin(roll * rad);
+  const cr = Math.cos(roll * rad);
+  const rightX = sy * sp * cr - cy * sr;
+  const rightY = -cy * sp * cr - sy * sr;
+  const rightZ = cp * -sr;
+
+  const ent = createEntity("point_worldtext", {
+    message: text,
+    enabled: true,
+    fullbright: true,
+    // The text colour is a `point_worldtext` spawn keyvalue (m_Color), NOT the m_clrRender field
+    // color.ts has to route around — so the missing-schema-field restriction does not apply here.
+    color: `${c.r | 0} ${c.g | 0} ${c.b | 0} 255`,
+    font_name: "Arial",
+    font_size: 64,
+    world_units_per_pixel: 0.5,
+    justify_horizontal: 1, // CENTER — the letter hangs centred over the head
+    justify_vertical: 1, // CENTER
+    reorient_mode: 0, // NONE, matching the C# TextSetting defaults
+  });
+  if (ent === null) return null;
+
+  // Absolute placement FIRST, parent SECOND. `acceptInput` queues on the engine's same-tick I/O
+  // pump and SetParent re-bases whatever transform the entity has when it runs, so parenting first
+  // would turn the world position into a local offset from the pawn and throw the hat across the
+  // map. This is the order the C# used, for the same reason.
+  ent.teleport(
+    [
+      ox + rightX * HAT_SIDE_OFFSET,
+      oy + rightY * HAT_SIDE_OFFSET,
+      oz + HAT_HEIGHT + rightZ * HAT_SIDE_OFFSET,
+    ],
+    [pitch, yaw, roll],
+    null,
+  );
+  ent.acceptInput("SetParent", "!activator", pawn.ref);
+  return ent;
+}
+
+/** Spawn both panels for `slot`. Returns false if the pawn or either panel would not resolve. */
+function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
+  const c = ROLE_COLORS[role];
+  const origin = pawn.origin;
+  if (c === undefined || origin === null) return false;
+
+  const angles = pawn.angles;
+  // Body rotation, NOT eyeAngles — a hat that pitched with the player's aim would tumble.
+  const pitch = angles === null ? 0 : angles.x;
+  const yaw = angles === null ? 0 : angles.y;
+  const roll = angles === null ? 0 : angles.z;
+
+  const letter = iconLetter(role);
+  const base = slot * 2;
+  for (let i = 0; i < HAT_YAWS.length; i++) {
+    const ent = spawnHatPart(
+      pawn,
+      origin.x,
+      origin.y,
+      origin.z,
+      pitch,
+      yaw + HAT_YAWS[i]!,
+      roll + 90,
+      letter,
+      c,
+    );
+    if (ent === null) {
+      removeIcons(slot); // half a hat is worse than none — it reads as a different marker
+      return false;
+    }
+    icons[base + i] = ent;
+  }
+  return true;
+}
+
+/** Destroy `slot`'s panels and drop their visibility rules. */
+function removeIcons(slot: number): void {
+  const base = slot * 2;
+  for (let i = 0; i < 2; i++) {
+    const ent = icons[base + i];
+    if (ent === null) continue;
+    // Release the rule before the entity so the native table does not carry a dead entry.
+    Transmit.reset(ent);
+    ent.remove();
+    icons[base + i] = null;
+  }
+}
+
+/** True if `slot` currently has panels in the world. */
+function hasIcons(slot: number): boolean {
+  return icons[slot * 2] !== null;
+}
+
+/**
+ * Restrict `slot`'s panels to `viewers`. FAIL-CLOSED: a refused rule destroys the icon, because an
+ * unrestricted Traitor icon would announce every Traitor to the whole server.
+ */
+function restrictIcons(slot: number, viewers: readonly number[]): void {
+  const base = slot * 2;
+  for (let i = 0; i < 2; i++) {
+    const ent = icons[base + i];
+    if (ent === null) continue;
+    if (Transmit.setVisibleTo(ent, viewers)) continue;
+    if (!warnedNoTransmit) {
+      warnedNoTransmit = true;
+      console.warn("[ttt] transmit filtering unavailable — hiding role icons instead of leaking them");
+    }
+    removeIcons(slot);
+    return;
+  }
+}
+
+/** Drop every rule on `slot`'s panels, i.e. show them to everyone (the C# `RevealToAll`). */
+function unrestrictIcons(slot: number): void {
+  const base = slot * 2;
+  for (let i = 0; i < 2; i++) {
+    const ent = icons[base + i];
+    if (ent !== null) Transmit.reset(ent);
+  }
+}
+
+/**
+ * Re-push the traitor viewer list onto every Traitor icon.
+ *
+ * `traitorsThisRound` grows as roles are dealt, and `setVisibleTo` REPLACES a rule rather than
+ * merging into it, so every existing Traitor icon has to be re-pushed each time a new Traitor
+ * appears — the transpose of the C# double loop that OR'd the new bit into every traitor's mask.
+ */
+function refreshTraitorIcons(): void {
+  for (let i = 0; i < traitors.length; i++) {
+    const slot = traitors[i]!;
+    if (revealed[slot] === 1) continue; // Stickers already made this one public; do not re-hide it
+    restrictIcons(slot, traitors);
+  }
+}
+
+/** Force `slot` onto the role uniform. Deferred by the caller — see `applyRoleVisuals`. */
+function applyRoleModel(pawn: Pawn, role: RoleId): void {
+  const model = role === RoleId.Detective ? MODEL_CT : MODEL_T;
+  if (!pawn.ref.setModel(model)) console.warn(`[ttt] role model rejected: ${model}`);
+}
+
+/**
+ * Apply the uniform and the icon, one frame after the role was dealt.
+ *
+ * `applyRoleTeam` runs `switchTeam` immediately after the `roleAssign` dispatch and the engine MAY
+ * respawn the pawn inside that call, which puts it back in the staging list. `SetModel`/`SetParent`
+ * on a staged pawn segfaults even though the ref reads live — the C# hit the same assertion and
+ * solved it the same way, by deferring to the next world update. `retries` covers the case where
+ * the respawn has not finished by then.
+ */
+function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
+  void nextFrame().then(() => {
+    // The role may have been re-dealt (or the player cut) while we waited.
+    if (reg.roleOf(slot) !== role) return;
+    const pawn = pawnOf(slot);
+    if (pawn === null || !pawn.isValid) {
+      if (retries > 0) applyRoleVisuals(slot, role, retries - 1);
+      return;
+    }
+
+    applyRoleModel(pawn, role);
+
+    // Model first, panels second: a model swap rebuilds the skeleton the panels hang off.
+    // Innocents get no panels until something reveals them — see the header.
+    if (role !== RoleId.Traitor && role !== RoleId.Detective) return;
+    if (!spawnIcons(slot, pawn, role)) return;
+    if (role === RoleId.Traitor) refreshTraitorIcons();
+    // A Detective icon gets NO rule: visible to everyone, late joiners included.
+  });
+}
+
+/**
+ * Reveal `slot`'s role icon to the whole server for the rest of the round — the C#
+ * `IIconManager.RevealToAll`, which Stickers is built on.
+ *
+ * Exported because it is the reveal primitive: anything that publicly outs a player (Stickers here,
+ * the RTD "Proven" reward in the original) drives it.
+ */
+export function revealIconToAll(slot: number): void {
+  if (slot < 0 || slot >= MAX_SLOTS) return;
+  const role = reg.roleOf(slot);
+  if (role === RoleId.None || role === RoleId.Spectator) return;
+
+  if (!hasIcons(slot)) {
+    // An Innocent has no panels yet (they are spawned on demand); make them now. A dead player
+    // gets nothing: the C# destroyed the icon on death and `RevealToAll` never brought it back.
+    if (!reg.isAlive(slot)) return;
+    const pawn = pawnOf(slot);
+    if (pawn === null || !pawn.isValid) return;
+    if (!spawnIcons(slot, pawn, role)) return;
+  }
+  revealed[slot] = 1;
+  unrestrictIcons(slot);
+}
+
+/** Mark `slot` as owning Stickers for this round. Called from the shop item. */
+export function armStickers(slot: number): void {
+  if (slot >= 0 && slot < MAX_SLOTS) stickers[slot] = 1;
+}
+
+/**
+ * Write a role tag onto the scoreboard name — the stand-in for `SetClan`, see the header.
+ *
+ * The real name is captured from the registry the first time a tag goes on, so the tag can never
+ * be prefixed onto an already-prefixed name.
+ */
+function setRoleTag(slot: number, role: RoleId): void {
+  const p = Player.fromSlot(slot);
+  if (p === null) return;
+  if (tagged[slot] === 0) realNames[slot] = reg.nameOf(slot);
+  const real = realNames[slot]!;
+  if (real === "") return;
+  tagged[slot] = 1;
+  p.setName(`[${iconLetter(role)}] ${real}`);
+}
+
+/** Put a tagged player's real name back. */
+function clearRoleTag(slot: number): void {
+  if (tagged[slot] !== 1) return;
+  tagged[slot] = 0;
+  const real = realNames[slot]!;
+  if (real === "") return;
+  Player.fromSlot(slot)?.setName(real);
+}
+
+/** Tag every participant with the role they actually held (`RoundTimerListener.revealRoles`). */
+function tagAllRoles(): void {
+  const active = reg.activeSlots();
+  for (let i = 0; i < active.length; i++) {
+    const slot = active[i]!;
+    const role = reg.roleOf(slot);
+    if (role === RoleId.None) continue; // joined mid-round: nothing to reveal
+    setRoleTag(slot, role);
+  }
+}
+
+/** Destroy every icon and forget the round's visibility state (the C# `OnRoundStart`). */
+function clearAllIcons(): void {
+  for (let slot = 0; slot < MAX_SLOTS; slot++) removeIcons(slot);
+  traitors.length = 0;
+  revealed.fill(0);
+}
+
+/**
+ * Drop everything this module owns — map change and unload.
+ *
+ * `Transmit.resetAll` is safe to call from here because role icons are the only thing in this
+ * plugin that installs a transmit rule.
+ */
+export function resetIcons(): void {
+  clearAllIcons();
+  stickers.fill(0);
+  tagged.fill(0);
+  realNames.fill("");
+  Transmit.resetAll();
+}
+
+/** Register the icon, uniform and role-tag listeners. */
+export function installIcons(bus: EventBus<TttEvents>): void {
+  bus.on(
+    "roleAssign",
+    (ev) => {
+      if (ev.canceled) return;
+      const slot = ev.slot;
+      const role = ev.role;
+
+      // The C# rewrote the clan on every assignment — "Detective" for the Detective, empty for
+      // everyone else — which is what stops last round's reveal from persisting into this one.
+      if (role === RoleId.Detective) setRoleTag(slot, role);
+      else clearRoleTag(slot);
+
+      if (role === RoleId.None || role === RoleId.Spectator) return;
+
+      removeIcons(slot); // in case this is a re-assignment
+      // Recorded before the panels exist: every Traitor is dealt in this same frame, so by the
+      // time the deferred spawns run the set is complete and one refresh covers all of them.
+      // Bounded at 64 because `setVisibleTo` throws RangeError on a viewer outside [0, 64).
+      if (role === RoleId.Traitor && slot >= 0 && slot < 64 && traitors.indexOf(slot) < 0) {
+        traitors.push(slot);
+      }
+      applyRoleVisuals(slot, role, 1);
+    },
+    // MONITOR so the icon shows the role karma may have rewritten, not the one first dealt.
+    { priority: Priority.MONITOR },
+  );
+
+  // Part of keeping the alive-illusion up: a dead player's marker must not hang over their corpse.
+  bus.on("death", (ev) => removeIcons(ev.slot), { priority: Priority.MONITOR });
+
+  bus.on(
+    "bodyIdentify",
+    (ev) => {
+      // C# `BodyPickupListener` tags the body's owner with their real role — Traitors included.
+      const owner = ev.body.owner;
+      const role = ev.body.ownerRole;
+      if (role === RoleId.None || role === RoleId.Spectator) return;
+      if (reg.isConnected(owner)) setRoleTag(owner, role);
+    },
+    { ignoreCanceled: true, priority: Priority.MONITOR },
+  );
+
+  /**
+   * Stickers — the port of `StickerListener.OnHurt`.
+   *
+   * The trigger is a *canceled* taser hit from someone holding the item, which is precisely what
+   * the taser branch in effects.ts produces (it cancels the damage and scans the victim). Reading
+   * `canceled` is why this subscribes without `ignoreCanceled`.
+   */
+  bus.on(
+    "damage",
+    (ev) => {
+      if (!ev.canceled || !inProgress()) return;
+      const attacker = ev.attacker;
+      if (attacker < 0 || attacker >= MAX_SLOTS || stickers[attacker] !== 1) return;
+      if (!ev.weapon.includes("taser")) return;
+      revealIconToAll(ev.slot);
+    },
+    { priority: Priority.MONITOR },
+  );
+
+  bus.on(
+    "gameState",
+    (ev) => {
+      if (ev.state === GameState.Countdown) {
+        // Round start: kill last round's icons and put every tagged name back BEFORE `beginRound`
+        // refreshes the registry's name cache off the engine — otherwise "[T] Bob" becomes the
+        // name TTT believes Bob has.
+        clearAllIcons();
+        stickers.fill(0);
+        const active = reg.activeSlots();
+        for (let i = 0; i < active.length; i++) clearRoleTag(active[i]!);
+        return;
+      }
+      // Round end reveals everyone's real role on the scoreboard.
+      if (ev.state === GameState.Finished) tagAllRoles();
+    },
+    { ignoreCanceled: true },
+  );
+
+  bus.on("leave", (ev) => {
+    removeIcons(ev.slot);
+    stickers[ev.slot] = 0;
+    tagged[ev.slot] = 0;
+    realNames[ev.slot] = "";
+    const i = traitors.indexOf(ev.slot);
+    if (i >= 0) traitors.splice(i, 1);
+  });
+}

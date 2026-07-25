@@ -25,6 +25,7 @@
 import { RoleId, Team } from "../core/enums";
 import * as reg from "../core/registry";
 import { isPlayingTeam, switchTeam, teamOf } from "../cs2/pawn";
+import { bodyOfPlayer } from "../cs2/bodies";
 
 /** The team a role should be displayed on while a round is live. */
 export function teamForRole(role: RoleId): Team {
@@ -57,6 +58,47 @@ export function applyRoleTeam(slot: number, role: RoleId): boolean {
   if (role === RoleId.None || role === RoleId.Spectator) return false;
   const want = teamForRole(role);
   if (teamOf(slot) === want) return false;
+  switchTeam(slot, want);
+  return true;
+}
+
+/**
+ * Pin a player who is already in the round to the team their role entitles them to — the port of
+ * `TeamChangeHandler.onJoinTeam`'s refusal. Returns true if a move was undone.
+ *
+ * The C# hooked the `jointeam` client command and returned `Handled` for anyone in a live round, so
+ * the change never happened at all. s2script has no client-command hook, and `player_team` can only
+ * be observed (the pre-hook suppresses the broadcast, not the change) — so the move is undone one
+ * event later instead. Same end state, one event of flicker, and the engine's own `jointeam` kill
+ * still lands where the original would simply have refused the command.
+ *
+ * Left unguarded, `jointeam` is a lie generator under the team model above: T -> CT forges the
+ * "publicly confirmed innocent" signal a Traitor can never legitimately earn, CT -> T un-reveals a
+ * player whose corpse was found, and a dead player moving to Spectator announces the death the whole
+ * round is built on hiding.
+ *
+ * The exemptions are the C#'s: a player with no playing role is somebody else's problem (the
+ * late-join handler parks them in spectator, and a `Spectator` role means they opted out or were
+ * benched, so their team is theirs to pick), and a player whose corpse has already been identified
+ * is publicly dead — nothing they do with their team can leak anything that is still a secret. That
+ * second exemption is also load-bearing rather than merely faithful: `revealAsInnocent` puts an
+ * identified Innocent on CT while their role still says "Innocent", i.e. entitled to T, so without
+ * it this guard would undo every body identification the moment the reveal landed.
+ */
+export function enforceRoundTeam(slot: number, newTeam: Team): boolean {
+  const role = reg.roleOf(slot);
+  if (role === RoleId.None || role === RoleId.Spectator) return false;
+  if (bodyOfPlayer(slot)?.identified === true) return false;
+
+  const want = teamForRole(role);
+  if (newTeam === want) return false;
+  // Never issue a switch that is not needed: `switchTeam` may respawn the pawn (see the respawn
+  // hazard above), so a bounce racing a second request — or an engine move that already put them
+  // back — must not cost a loadout. The one bounce that does happen can only hit a player who just
+  // asked the engine for a team change, which had already taken their loadout off them.
+  if (teamOf(slot) === want) return false;
+  // `switchTeam` is the non-lethal move and works on dead controllers, and the engine events it
+  // fires internally do not re-dispatch to handlers on that frame — so this cannot bounce itself.
   switchTeam(slot, want);
   return true;
 }

@@ -14,6 +14,7 @@
 import { RoleId } from "../core/enums";
 import { n, list, s as str } from "../core/cvars";
 import { msg } from "../core/msgs";
+import { armStickers } from "../cs2/icons";
 import { clearSlot, GearSlot, give } from "../cs2/inventory";
 import { setArmor, tell } from "../cs2/pawn";
 import { register, type ShopItem, PurchaseResult } from "./shop";
@@ -92,6 +93,11 @@ export function registerItems(): void {
   register(
     item("stickers", "SHOP_ITEM_STICKERS", "SHOP_ITEM_STICKERS_DESC", RoleId.Detective, "css_ttt_shop_stickers_price", (slot) => {
       fx.grantStickers(slot);
+      // The item's actual payoff is the PERSISTENT reveal: the C# `StickerListener` calls
+      // `IIconManager.RevealToAll`, which makes the tased player's role icon transmit to every
+      // client for the rest of the round. `fx.grantStickers` only arms the chat notification;
+      // this arms the icon reveal in `icons.ts`, which owns the marker itself.
+      armStickers(slot);
     }, { limit: 1 }),
   );
 

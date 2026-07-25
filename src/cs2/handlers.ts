@@ -21,7 +21,8 @@ import { msg } from "../core/msgs";
 import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
-import { pawnOf, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
+import { pawnOf, setArmor, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
+import { weaponClass, type HeldWeapon } from "./inventory";
 import { revealAsInnocent } from "../game/teams";
 import { colorBody } from "./color";
 import { unspoofAlive } from "./spoof";
@@ -63,19 +64,73 @@ const BUY_ALIASES: Readonly<Record<string, string>> = {
   weapon_healthshot: "healthshot",
 };
 
-/** Remove the map's buy zones so the engine buy menu never opens. Called on each map start. */
-export function removeBuyZones(): void {
-  const zones = Entity.findByClass("func_buyzone");
-  for (let i = 0; i < zones.length; i++) zones[i]!.remove();
+/** Whether this map's buy zones have already been removed — the `MapZoneRemover` latch. */
+let zonesRemoved = false;
+
+/**
+ * Clear the once-per-map buy-zone latch. Called on map start.
+ *
+ * `MapZoneRemover.onMapStart` deliberately removes nothing here, and neither do we: map entities
+ * need not exist yet when this fires, and the engine's round-restart cleanup re-creates map-placed
+ * entities anyway — so a removal this early silently does nothing on most maps and the buy menu
+ * survives for the whole map. {@link removeBuyZones} runs from `round_start` instead.
+ */
+export function resetBuyZones(): void {
+  zonesRemoved = false;
 }
 
-/** Suppress the "bomb has been planted" broadcast, as `BombPlantSuppressor` did. */
+/**
+ * Remove the map's buy zones so the engine buy menu never opens. Driven from `round_start`, and
+ * latched so it costs one entity scan per round and one removal pass per map.
+ */
+export function removeBuyZones(): void {
+  if (zonesRemoved) return;
+  const zones = Entity.findByClass("func_buyzone");
+  // Do not burn the one-shot on a round that fired before the map's own entities existed; a map
+  // with no buy zones at all just re-scans (a handful of pointer compares) each round.
+  if (zones.length === 0) return;
+  for (let i = 0; i < zones.length; i++) zones[i]!.remove();
+  zonesRemoved = true;
+}
+
+/**
+ * Suppress radio text, as `BombPlantSuppressor` did.
+ *
+ * The C# blocked user message **322**, which is `CS_UM_RadioText` (its siblings' `452` is
+ * `CMsgTEFireBullets`, which pins the numbering space). That is what leaks the C4 planter: the
+ * bomb-planted radio line names the planter, and TTT puts nearly everyone on the same team, so a
+ * Traitor planting the shop C4 announces themselves to the server. Blocking the send for every
+ * recipient is exactly `um.Recipients.Clear()`.
+ */
 export function installBombSuppressor(): void {
   try {
-    UserMessages.onPre("CCSUsrMsg_BarTime", (): HookResultValue | void => HookResult.Handled);
-  } catch {
-    // Message unavailable on this build — nothing to suppress.
+    UserMessages.onPre("CCSUsrMsg_RadioText", (): HookResultValue | void => HookResult.Handled);
+  } catch (e) {
+    // `onPre` throws at subscribe time on a name this build cannot resolve. Say so — swallowing it
+    // silently reopens the role leak this module exists to plug.
+    console.warn(`[ttt] radio suppression unavailable: ${String(e)}`);
   }
+}
+
+/**
+ * Grant kevlar **and** a helmet — the port of `SetArmor(config.Armor, config.Helmet)`, whose
+ * `ArmorConfig.Helmet` shipped `true`.
+ *
+ * `CCSPlayer_ItemServices.m_bHasHelmet` is not in the generated schema, so the flag cannot be
+ * written directly (the C# wrote it and needed a second `SetStateChanged` on the sub-object before
+ * the client saw it at all). The engine's own grant path does both correctly, so the suit is given
+ * first and the armour value pinned afterwards — `item_assaultsuit` sets its own amount, which need
+ * not be what `css_ttt_shop_armor_amount` asks for.
+ *
+ * Role loadouts must NOT come through here: `CS2Player.Armor` passed `withHelmet: false`, so the
+ * starting armour of every role is helmetless.
+ */
+export function giveArmorWithHelmet(slot: number, amount: number): void {
+  pawnOf(slot)?.giveNamedItem("item_assaultsuit");
+  setArmor(slot, amount);
+  // The controller mirror the HUD reads for the helmet icon.
+  const p = Player.fromSlot(slot);
+  if (p !== null) p.pawnHasHelmet = true;
 }
 
 /**
@@ -83,6 +138,34 @@ export function installBombSuppressor(): void {
  * suppressed.
  */
 export function onItemPurchase(slot: number, weapon: string): boolean {
+  // `item_purchase` is a POST-grant notification: the engine has already handed the weapon over and
+  // taken its own money, and `HookResult.Handled` only hides the event from other listeners. So the
+  // engine's grant is stripped here first, exactly as `BuyMenuHandler.OnPurchase` did — otherwise a
+  // buy zone that outlived `removeBuyZones` hands out free real weapons on top of the TTT loadout,
+  // and an aliased buy whose shop purchase FAILS (wrong role, no credits, limit) is kept for free.
+  //
+  // Unlike the C#, the removal runs synchronously BEFORE `tryPurchase`. The original queued its
+  // removals onto the next world update while the shop grant ran inline, so they landed after the
+  // grant and destroyed the shop weapon too — replicating that leaves an M4A1 buyer with no rifle.
+  const pawn = pawnOf(slot);
+  if (pawn !== null && pawn.isValid) {
+    const held = pawn.weapons as HeldWeapon[];
+    for (let i = 0; i < held.length; i++) {
+      const w = held[i]!;
+      if (weaponClass(w) === weapon) {
+        pawn.removeWeapon(w);
+        break;
+      }
+    }
+  }
+  // Armour is not a weapon entity, so it has to be zeroed on the pawn instead. Like the C#, the
+  // helmet flag is left alone — there is no way to clear it, and it grants nothing on its own.
+  if (weapon === "item_assaultsuit" || weapon === "item_kevlar") setArmor(slot, 0);
+
+  // The C#'s two extra "clear the whole gear slot" cases are deliberately not ported: the m4a1 shop
+  // item already clears slots 0,1 (`css_ttt_shop_m4a1_clear_slots`) and the deagle item already
+  // clears the pistol slot, so re-clearing here would only destroy the player's own loadout.
+
   const itemId = BUY_ALIASES[weapon];
   if (itemId === undefined) return false;
   const item = itemById(itemId);
