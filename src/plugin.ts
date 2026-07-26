@@ -44,7 +44,7 @@ import { EventBus, Priority } from "./core/bus";
 import type { TttEvents } from "./core/events";
 import { registerCvars, refresh, cfg } from "./core/cvars";
 import { config } from "@s2script/sdk/config";
-import { msg, precompileAll, setPhrases } from "./core/msgs";
+import { installPhrases, msg, precompileAll } from "./core/msgs";
 import * as reg from "./core/registry";
 
 import {
@@ -85,21 +85,31 @@ import { registerCommands } from "./commands";
  * Load an operator-supplied phrase file, if `phrases_file` names one. It is a flat
  * `{ "KEY": "text" }` JSON object using the same `%KEY%` / `{color}` / `{0}` / `%s%` / `%an%` syntax
  * as the built-in table; unknown keys fall back to English.
+ *
+ * This is folded into the SEED handed to `Translations.load`, so it still works exactly as before —
+ * and the SDK's own `translations/<code>/ttt.phrases.json` files then layer per-language text on top
+ * of it, which is the part TTT no longer implements itself.
  */
-function loadPhraseOverrides(): void {
+function installTranslations(): void {
   const name = config.getString("phrases_file");
-  if (name === "") return;
+  if (name === "") {
+    installPhrases();
+    return;
+  }
   const raw = config.readFile(name);
   if (raw === null) {
     console.log(`[ttt] WARN: phrases_file "${name}" not found in the configs directory`);
+    installPhrases();
     return;
   }
   try {
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
-    setPhrases(parsed as Record<string, string>);
+    installPhrases(parsed as Record<string, string>);
   } catch (err) {
     console.log(`[ttt] ERROR: phrases_file "${name}" is not valid JSON: ${String(err)}`);
+    // Register the built-ins anyway: without a load() every message would render as its raw key.
+    installPhrases();
   }
 }
 
@@ -141,7 +151,7 @@ export default plugin((ctx) => {
   // ── configuration ─────────────────────────────────────────────────────────
   registerCvars();
   refresh();
-  loadPhraseOverrides();
+  installTranslations();
   precompileAll();
 
   // ── subsystem wiring ──────────────────────────────────────────────────────

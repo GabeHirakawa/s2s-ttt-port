@@ -12,7 +12,7 @@
 
 import { RoleId } from "../core/enums";
 import { cfg } from "../core/cvars";
-import { msg } from "../core/msgs";
+import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
@@ -132,7 +132,7 @@ function choose(pool: number[], role: RoleId): number {
 
 /** Apply a role's health, armor and starting weapons, and tell the player what they are. */
 export function applyLoadout(slot: number, role: RoleId): void {
-  tell(slot, msg("ROLE_ASSIGNED", roleName(role)));
+  tell(slot, msgFor(slot, "ROLE_ASSIGNED", roleName(role)));
 
   if (cfg.stripOnAssign) stripAll(slot);
 
@@ -162,7 +162,7 @@ export function revealTraitorBuddies(): void {
   for (let i = 0; i < traitors.length; i++) {
     const me = traitors[i]!;
     if (traitors.length === 1) {
-      tell(me, msg("ROLE_REVEAL_TRAITORS_NONE"));
+      tell(me, msgFor(me, "ROLE_REVEAL_TRAITORS_NONE"));
       continue;
     }
     tell(me, grey);

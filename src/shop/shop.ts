@@ -11,7 +11,7 @@
  */
 
 import { MAX_SLOTS, RoleId } from "../core/enums";
-import { msg } from "../core/msgs";
+import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
@@ -164,7 +164,8 @@ export function resetShop(): void {
 export function tryPurchase(slot: number, item: ShopItem, tellWhy = true): PurchaseResult {
   const balance = balances[slot]!;
   if (item.price > balance) {
-    if (tellWhy) tell(slot, msg("SHOP_INSUFFICIENT_BALANCE", msg(item.nameKey), item.price, balance));
+    if (tellWhy)
+      tell(slot, msgFor(slot, "SHOP_INSUFFICIENT_BALANCE", msgFor(slot, item.nameKey), item.price, balance));
     return PurchaseResult.InsufficientFunds;
   }
 

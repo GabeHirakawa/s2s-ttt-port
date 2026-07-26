@@ -13,7 +13,7 @@
 
 import { RoleId } from "../core/enums";
 import { n, list, s as str } from "../core/cvars";
-import { msg } from "../core/msgs";
+import { msg, msgFor } from "../core/msgs";
 import { giveArmorWithHelmet } from "../cs2/handlers";
 import { armStickers } from "../cs2/icons";
 import { clearSlot, GearSlot, give } from "../cs2/inventory";
@@ -216,7 +216,7 @@ export function registerItems(): void {
 
   register(
     item("tripwire", "SHOP_ITEM_TRIPWIRE", "SHOP_ITEM_TRIPWIRE_DESC", RoleId.Traitor, "css_ttt_shop_tripwire_price", (slot) => {
-      if (!fx.placeTripwire(slot)) tell(slot, msg("SHOP_ITEM_TRIPWIRE_TOOFAR"));
+      if (!fx.placeTripwire(slot)) tell(slot, msgFor(slot, "SHOP_ITEM_TRIPWIRE_TOOFAR"));
     }),
   );
 }

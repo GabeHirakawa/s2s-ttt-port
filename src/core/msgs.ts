@@ -15,10 +15,27 @@
  *
  * Formatting is then a `join` over precomputed chunks, with the two grammar passes running only
  * for the minority of phrases that actually contain those markers.
+ *
+ * LOOKUP AND LANGUAGE BELONG TO THE SDK. `Translations` owns the phrase set, the per-language
+ * override files (`translations/<code>/ttt.phrases.json`) and picking a client's language; this file
+ * no longer keeps its own table. What stays here is the part the SDK does not do: `%KEY%` splices
+ * (52 phrases), `{colour}` tokens (55), and the `%s%`/`%an%` grammar passes (21).
+ *
+ * The SDK is asked for the TEMPLATE only — `translate(slot, key)` with no args — because argument
+ * substitution here is `{0}`-based and interacts with the grammar passes, while the SDK's is
+ * `{1}`-based. Handing it args would substitute them before `%s%` could see the number it needs to
+ * agree with.
+ *
+ * The compile cache is therefore keyed by TEMPLATE, not by key: two languages give two templates,
+ * and a phrase shared across languages compiles once.
  */
 
 import { ChatColors } from "@s2script/cs2";
+import { Translations } from "@s2script/sdk/translations";
 import { PHRASES } from "./phrases";
+
+/** The phrase-set name the SDK registers us under; also the `translations/<code>/<NAME>.phrases.json` stem. */
+const SET = "ttt";
 
 /** `{token}` → chat colour control byte. Unknown tokens are left untouched. */
 const COLORS: Readonly<Record<string, string>> = {
@@ -56,8 +73,10 @@ interface Compiled {
   needsGrammar: boolean;
 }
 
+/** Compiled phrases, keyed by the raw TEMPLATE so each language's variant caches independently. */
 const compiled = new Map<string, Compiled>();
-let table: Record<string, string> = PHRASES as Record<string, string>;
+/** The seed set, kept only to resolve `%KEY%` splices — the SDK owns the per-language lookup. */
+let seed: Record<string, string> = PHRASES as Record<string, string>;
 
 /** Replace every `{color}` token with its control byte. */
 function applyColors(text: string): string {
@@ -73,28 +92,23 @@ function applyColors(text: string): string {
  * key contains "PREFIX" (CounterStrikeSharp forces a leading space onto an all-colour string, which
  * the original stripped everywhere except prefixes).
  */
-function expand(text: string, depth: number): string {
+function expand(text: string, depth: number, slot: number): string {
   if (depth > 8 || text.indexOf("%") < 0) return text;
   return text.replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (whole, key: string) => {
     // %s% and %an% are grammar markers, not splices — leave them for the runtime pass.
     if (key === "s" || key.toLowerCase() === "an") return whole;
-    const value = table[key];
+    // Resolve the spliced phrase for the SAME viewer, so a translated phrase splices translated
+    // parts rather than English ones. Falls back to the seed for a key the SDK does not know.
+    const value = lookup(slot, key) ?? seed[key];
     if (value === undefined) return whole;
-    const resolved = expand(value, depth + 1);
+    const resolved = expand(value, depth + 1, slot);
     return key.toUpperCase().includes("PREFIX") ? resolved : resolved.replace(/^\s+/, "");
   });
 }
 
 /** Compile one phrase into its chunk list. */
-function compile(key: string): Compiled {
-  const source = table[key];
-  if (source === undefined) {
-    const missing: Compiled = { parts: [key], slots: [-1], needsGrammar: false };
-    compiled.set(key, missing);
-    return missing;
-  }
-
-  const text = applyColors(expand(source, 0));
+function compile(source: string, slot: number): Compiled {
+  const text = applyColors(expand(source, 0, slot));
 
   const parts: string[] = [];
   const slots: number[] = [];
@@ -114,7 +128,7 @@ function compile(key: string): Compiled {
     slots,
     needsGrammar: text.includes("%s%") || /%an%/i.test(text),
   };
-  compiled.set(key, result);
+  compiled.set(source, result);
   return result;
 }
 
@@ -156,13 +170,35 @@ function fixPossessive(text: string): string {
 }
 
 /**
- * Format a phrase. `args` fill `{0}`, `{1}`, … — pass them in declaration order.
+ * The template for `key` in `slot`'s language, or undefined when the set has no such key.
+ *
+ * `translate` echoes the key back when it does not know it (SourceMod behaviour), so that is the
+ * miss signal — otherwise an unknown key would compile the literal key as if it were a phrase.
+ */
+function lookup(slot: number, key: string): string | undefined {
+  const t = Translations.translate(slot, key);
+  return t === key ? undefined : t;
+}
+
+/**
+ * Format a phrase for the server default language. `args` fill `{0}`, `{1}`, … in declaration order.
  *
  * @example
  * msg("SHOP_PURCHASED", item.name)
  */
 export function msg(key: string, ...args: (string | number)[]): string {
-  const c = compiled.get(key) ?? compile(key);
+  return msgFor(-1, key, ...args);
+}
+
+/**
+ * Format a phrase in `slot`'s own language. Use this for anything addressed to one player; `msg`
+ * stays correct for chat-wide and console text.
+ */
+export function msgFor(slot: number, key: string, ...args: (string | number)[]): string {
+  const source = lookup(slot, key) ?? seed[key];
+  // An unknown key renders as the key itself — visible in game, and never a crash mid-round.
+  if (source === undefined) return key;
+  const c = compiled.get(source) ?? compile(source, slot);
 
   // Fast path: a constant phrase with no argument slots.
   if (c.parts.length === 1) {
@@ -189,17 +225,24 @@ function formatNumber(v: number): string {
 }
 
 /**
- * Install an alternative phrase table (e.g. loaded from `configs/ttt.phrases.json`). Unknown keys
- * fall back to the built-in English table; every compiled phrase is discarded.
+ * Register the phrase set with the SDK. Call once at load, before anything formats a message.
+ *
+ * `overrides` is the operator's flat `phrases_file`, folded into the SEED rather than replacing the
+ * table — so an existing config keeps working while the SDK's own
+ * `translations/<code>/ttt.phrases.json` files layer languages on top of it.
  */
-export function setPhrases(overrides: Record<string, string>): void {
-  table = { ...PHRASES, ...overrides };
+export function installPhrases(overrides: Record<string, string> = {}): void {
+  seed = { ...PHRASES, ...overrides };
   compiled.clear();
+  Translations.load(SET, seed);
 }
 
-/** Warm the cache for every known phrase so no message pays compilation cost mid-round. */
+/** Warm the cache for the server default language so no message pays compilation cost mid-round. */
 export function precompileAll(): void {
-  for (const key in table) compile(key);
+  for (const key in seed) {
+    const source = lookup(-1, key) ?? seed[key];
+    if (source !== undefined && !compiled.has(source)) compile(source, -1);
+  }
 }
 
 /** The chat colour bytes, exposed for code that builds strings outside the phrase table. */

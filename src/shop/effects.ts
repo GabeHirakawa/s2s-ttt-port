@@ -24,7 +24,7 @@ import { Beam, Fade, HintText, type BeamHandle } from "@s2script/cs2";
 import { Server } from "@s2script/sdk/server";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { b, n, s } from "../core/cvars";
-import { msg } from "../core/msgs";
+import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
@@ -238,7 +238,7 @@ export function spendGlove(slot: number, forBody: boolean): boolean {
       ? msg("SHOP_ITEM_GLOVES_USED_BODY", left - 1, max)
       : msg("SHOP_ITEM_GLOVES_USED_KILL", left - 1, max),
   );
-  if (left - 1 === 0) tell(slot, msg("SHOP_ITEM_GLOVES_WORN_OUT"));
+  if (left - 1 === 0) tell(slot, msgFor(slot, "SHOP_ITEM_GLOVES_WORN_OUT"));
   return true;
 }
 
@@ -261,7 +261,7 @@ export function spendBodyPaint(slot: number, body: Body): boolean {
   // this mode has already produced twice. Painting works as-is; adding the flip is only worth doing
   // alongside an explicit opaque alpha, and only after checking it in game.
   colorCorpse(body.ref, body.owner, resolvePaintColor());
-  if (left - 1 === 0) tell(slot, msg("SHOP_ITEM_BODY_PAINT_OUT"));
+  if (left - 1 === 0) tell(slot, msgFor(slot, "SHOP_ITEM_BODY_PAINT_OUT"));
   return true;
 }
 
@@ -1117,9 +1117,9 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
         const hp = pawn?.health ?? 0;
         if (hp <= 0) setHealth(victim, 1);
         const role = roleName(reg.roleOf(victim));
-        tell(attacker, msg("TASER_SCANNED", reg.nameOf(victim), role));
+        tell(attacker, msgFor(attacker, "TASER_SCANNED", reg.nameOf(victim), role));
         if (hasStickers[attacker] === 1) {
-          tell(victim, msg("SHOP_ITEM_STICKERS_HIT"));
+          tell(victim, msgFor(victim, "SHOP_ITEM_STICKERS_HIT"));
           revealRole(victim);
         }
         return;
@@ -1135,13 +1135,13 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
         if (sameTeam && !b("css_ttt_shop_onedeagle_ff")) {
           hasRevolver[attacker] = 0;
           ev.canceled = true;
-          tell(attacker, msg("SHOP_ITEM_DEAGLE_HIT_FF"));
+          tell(attacker, msgFor(attacker, "SHOP_ITEM_DEAGLE_HIT_FF"));
           if (b("css_ttt_shop_onedeagle_kill_shooter_on_ff")) setHealth(attacker, 0);
           return;
         }
         hasRevolver[attacker] = 0; // one shot only, matching the C# RemoveItem on first hit
         ev.damage = 1000;
-        tell(victim, msg("SHOP_ITEM_DEAGLE_VICTIM"));
+        tell(victim, msgFor(victim, "SHOP_ITEM_DEAGLE_VICTIM"));
         return;
       }
 
@@ -1160,7 +1160,7 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
       // flashes the victim's screen; Poison Smoke (in `weaponfx.ts`) is the silent one.
       if (poisonShotsLeft(attacker) > 0 && isPistol(ev.weapon)) {
         applyPoison(victim, attacker, false);
-        tell(attacker, msg("SHOP_ITEM_POISON_HIT", reg.nameOf(victim)));
+        tell(attacker, msgFor(attacker, "SHOP_ITEM_POISON_HIT", reg.nameOf(victim)));
       }
     },
     { priority: Priority.HIGH },

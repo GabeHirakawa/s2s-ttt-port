@@ -18,15 +18,14 @@
  */
 
 import { nextFrame } from "@s2script/sdk/timers";
-import { HookResult, Player, type HookResultValue } from "@s2script/cs2";
+import { HookResult, Player, type HookResultValue, type MatchStats } from "@s2script/cs2";
 // `fireToClient` lives on the engine-generic Events, not the CS2 typed overlay.
 import { Events } from "@s2script/sdk/events";
 import type { GameEvent } from "@s2script/sdk/events";
 import type { DamageInfo } from "@s2script/sdk/damage";
 import { Server } from "@s2script/sdk/server";
-import { config } from "@s2script/sdk/config";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
-import { msg } from "../core/msgs";
+import { msg, msgFor } from "../core/msgs";
 import { Priority, type EventBus } from "../core/bus";
 import { sharedDamage, type TttEvents } from "../core/events";
 import * as reg from "../core/registry";
@@ -146,84 +145,22 @@ function activeClassOf(slot: number): string {
 
 // ── scoreboard stats ─────────────────────────────────────────────────────────
 /**
- * Hiding the scoreboard — the port of `CombatHandler.hideAndTrackStats` + `PlayerStatsTracker`.
+ * Scoreboard match stats — kills/deaths/assists/damage.
  *
- * The engine writes K/D/A and the damage (ADR) column into
- * `CCSPlayerController::m_pActionTrackingServices->m_matchStats` BEFORE the `player_death` /
- * `player_hurt` pre-hooks run, and it networks them independently of the event broadcast. So
- * suppressing the broadcast hides the kill feed and nothing else: press TAB after a gunshot and the
- * Kills/Deaths columns name both the killer and the victim, and a Traitor who merely *hits* someone
- * is outed by their damage number moving. That is the single largest information leak the port can
- * have, so the original undoes the engine's write on the spot and re-applies it later:
+ * TTT hides a death until the body is found, so the engine's own increments have to be undone and
+ * banked until the round is decided. This used to be ~190 lines: two hardcoded structural offsets
+ * (`m_pActionTrackingServices`, `m_matchStats`), a probe that validated them against plausible
+ * values, an operator override file, and a write-verification pass — all of it because nothing
+ * resolved a schema offset at runtime.
  *
- *   - a death is subtracted immediately and added back when the corpse is identified (or at round
- *     end, for a body nobody ever found),
- *   - a kill/assist is subtracted immediately, banked privately, and flushed at round end,
- *   - damage is subtracted and NEVER added back — the C# banks it in `RoundData.Damage` and
- *     `revealKills()` only ever flushes Kills and Assists, so ADR stays hidden for good.
+ * `Player.matchStats` resolves both hops BY NAME at runtime, so the offsets, the probe, the override
+ * file and the verification are all gone. It also fixes the feature: the hardcoded pair was WRONG
+ * (`+0x7f8`/`+0x98` against a real `+2760`/`+208`), so the probe correctly refused to write and stat
+ * hiding was silently off on every build.
  *
- * `m_pActionTrackingServices` is a pointer member that the generated schema does not expose (there
- * is no `*Services` sub-object on `CCSPlayerController` in schema.generated.d.ts), so the only route
- * is `EntityRef`'s raw pointer-chain surface. Offsets are build-specific: they are validated before
- * the first write and the whole feature no-ops if they do not check out — see `probeStats`.
+ * `notifyChanged()` after a write is what re-networks the sub-object — the scoreboard is rendered
+ * client-side, so a write without it changes nothing anyone can see.
  */
-const enum StatsMode {
-  /** Offsets not validated yet. */
-  Unknown = 0,
-  /** Validated — the raw path is live. */
-  Enabled = 1,
-  /** Validation failed; every raw read/write is a no-op for the rest of the session. */
-  Disabled = 2,
-}
-
-/**
- * Field offsets inside `CSMatchStats_t`. It derives `CSPerRoundStats_t`, where these four live; that
- * base block has been stable across CS2 schema revisions, which is why only the two structural
- * offsets below are overridable.
- */
-const F_KILLS = 0x30;
-const F_DEATHS = 0x34;
-const F_ASSISTS = 0x38;
-const F_DAMAGE = 0x3c;
-const F_UTILITY_DAMAGE = 0x5c;
-
-/**
- * The two STRUCTURAL offsets — `CCSPlayerController::m_pActionTrackingServices` (the pointer hop)
- * and `CCSPlayerController_ActionTrackingServices::m_matchStats` (the block base).
- *
- * These move with the game build. The values below come from a CS2 client schema dump and are a
- * starting point, not a guarantee: nothing in either @s2script package resolves a schema offset at
- * runtime, so there is no way to derive them here. If they are wrong on a given build the probe
- * below refuses to write anything and says so on the console — the operator then supplies the
- * correct pair in `ttt_offsets.json` rather than rebuilding the plugin.
- */
-let actionTrackingOff = 0x7f8;
-let matchStatsOff = 0x98;
-/** The pointer path handed to `read*Via`/`write*Via`. Reused so the hot path allocates nothing. */
-const statsChain = [actionTrackingOff];
-
-/**
- * Operator override for the two offsets above, read once on the first probe:
- * `{ "actionTracking": 2040, "matchStats": 152 }` — plain JSON numbers, `0x…` strings are not
- * parsed. Lives in the configs directory, alongside `phrases_file`.
- */
-const OFFSETS_FILE = "ttt_offsets.json";
-
-let statsMode: StatsMode = StatsMode.Unknown;
-/** Failed evidence checks so far — the shape can be right before the engine has anything to show. */
-let statsProbes = 0;
-/** Has a write been read back yet? The first one is verified, then trusted. */
-let statsWriteVerified = false;
-
-/** A kill/death/assist column above this is not a kill/death/assist column. */
-const MAX_PLAUSIBLE_COUNT = 1000;
-/** Same idea for the damage column: real ADR totals do not reach six figures. */
-const MAX_PLAUSIBLE_DAMAGE = 100000;
-/** Retries before the offsets are declared wrong: the first hits are not always attributable. */
-const MAX_STAT_PROBES = 8;
-/** Canonical user-space pointer bounds — anything outside is not a pointer. */
-const MIN_PTR = 0x10000n;
-const MAX_PTR = 0x800000000000n;
 
 /** Per-round kills/assists withheld from the scoreboard until the round is decided. */
 const bankedKills = new Int16Array(MAX_SLOTS);
@@ -231,137 +168,41 @@ const bankedAssists = new Int16Array(MAX_SLOTS);
 /** Whether this slot's death has already been added back (corpse identified). */
 const deathRevealed = new Uint8Array(MAX_SLOTS);
 
-function readStat(p: Player, field: number): number | null {
-  return p.ref.readInt32Via(statsChain, matchStatsOff + field);
+/** The four columns TTT rewrites. Named so a caller cannot pass an arbitrary field. */
+type StatField = "kills" | "deaths" | "assists" | "damage" | "utilityDamage";
+
+/** This player's match stats, or null when the services pointer is not resolvable yet. */
+function statsOf(slot: number): MatchStats | null {
+  return Player.fromSlot(slot)?.matchStats ?? null;
 }
 
-/** Give up on the raw path for the rest of the session, saying why exactly once. */
-function disableStats(why: string): void {
-  statsMode = StatsMode.Disabled;
-  console.log(`[ttt] WARN: scoreboard stat hiding is OFF: ${why}. ` +
-      `Supply the correct offsets in "${OFFSETS_FILE}" ({"actionTracking":N,"matchStats":N}).`,
-  );
-}
-
-function loadOffsetOverrides(): void {
-  const raw = config.readFile(OFFSETS_FILE);
-  if (raw === null) return;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) throw new Error("not an object");
-    const rec = parsed as Record<string, unknown>;
-    const at = rec.actionTracking;
-    const ms = rec.matchStats;
-    if (typeof at === "number" && at > 0) {
-      actionTrackingOff = at;
-      statsChain[0] = at;
-    }
-    if (typeof ms === "number" && ms >= 0) matchStatsOff = ms;
-  } catch (err) {
-    console.log(`[ttt] ERROR: ${OFFSETS_FILE} is not valid JSON: ${String(err)}`);
-  }
-}
-
-function plausibleCount(v: number): boolean {
-  return v >= 0 && v < MAX_PLAUSIBLE_COUNT;
+/** Overwrite one column and re-network it. */
+function setStat(slot: number, field: StatField, value: number): void {
+  const ms = statsOf(slot);
+  if (ms === null) return;
+  ms[field] = value;
+  ms.notifyChanged();
 }
 
 /**
- * Decide whether the offsets above name what they claim to, using the one moment where the answer
- * is knowable: the engine has JUST applied the increment this hook exists to undo, so the field we
- * were called about must already show it (`atLeast`).
+ * Add `delta` to one column, floored at 0.
  *
- * Three gates, all read-only — nothing is written until every one of them passes:
- *
- *  1. memory safety. The value at `actionTrackingOff` must LOOK like a user-space pointer before
- *     anything dereferences it. A wrong offset lands on floats or small ints, and `readInt32Via`
- *     would happily deref whatever it finds; the alignment + range test rejects both shapes.
- *  2. shape. All four counters must read as plausible small non-negative numbers — this is what
- *     catches an offset that resolves to a *neighbouring* services pointer.
- *  3. evidence. The counter for `field` must already carry the engine's increment.
- *
- * A gate-1 failure is fatal (the pointer is simply not there). A gate-3 failure only costs a retry:
- * the very first hit of a session can be self-damage or an unattributed world hit.
+ * The floor is deliberate: a double-fire, or an engine that did not increment in the first place,
+ * would otherwise leave a NEGATIVE number sitting in the Kills column — far more conspicuous than
+ * the increment being hidden.
  */
-function probeStats(slot: number, field: number, atLeast: number): void {
-  const p = Player.fromSlot(slot);
-  if (p === null) return;
-  if (statsProbes === 0) loadOffsetOverrides();
-  statsProbes++;
-
-  const ptr = p.ref.readUInt64(actionTrackingOff);
-  if (ptr === null || ptr < MIN_PTR || ptr >= MAX_PTR || (ptr & 7n) !== 0n) {
-    disableStats(`no services pointer at controller+0x${actionTrackingOff.toString(16)}`);
-    return;
-  }
-
-  const kills = readStat(p, F_KILLS);
-  const deaths = readStat(p, F_DEATHS);
-  const assists = readStat(p, F_ASSISTS);
-  const damage = readStat(p, F_DAMAGE);
-  if (kills === null || deaths === null || assists === null || damage === null) {
-    disableStats("the match-stats block did not resolve");
-    return;
-  }
-  if (
-    !plausibleCount(kills) ||
-    !plausibleCount(deaths) ||
-    !plausibleCount(assists) ||
-    damage < 0 ||
-    damage > MAX_PLAUSIBLE_DAMAGE
-  ) {
-    disableStats(`implausible counters (${kills}/${deaths}/${assists}/${damage})`);
-    return;
-  }
-
-  const observed = field === F_DAMAGE ? damage : field === F_DEATHS ? deaths : kills;
-  if (observed < atLeast) {
-    if (statsProbes >= MAX_STAT_PROBES) disableStats("the counters never moved with the engine");
-    return;
-  }
-  statsMode = StatsMode.Enabled;
-}
-
-/** Overwrite one match-stats field and re-network the sub-object. */
-function setStat(slot: number, field: number, value: number): void {
-  if (statsMode !== StatsMode.Enabled) return;
-  const p = Player.fromSlot(slot);
-  if (p === null) return;
-  if (!p.ref.writeInt32Via(statsChain, matchStatsOff + field, value)) return;
-  // The exact mirror of the C#'s `SetStateChanged(player, "CCSPlayerController",
-  // "m_pActionTrackingServices")`: notifying the controller-level pointer is what re-networks the
-  // whole sub-object. (The C# also fires two `CSPerRoundStats_t` notifies; the SDK has no
-  // chain-notify and the controller-level one is the one that does the work.)
-  p.ref.notifyStateChanged(actionTrackingOff);
-}
-
-/**
- * Add `delta` to one match-stats field, floored at 0.
- *
- * The floor is deliberate: a mis-resolved offset, a double-fire or an engine that did not increment
- * in the first place would otherwise leave a NEGATIVE number sitting in the Kills column, which is
- * far more conspicuous than the increment being hidden.
- */
-function bumpStat(slot: number, field: number, delta: number): void {
-  if (statsMode !== StatsMode.Enabled || delta === 0) return;
-  const p = Player.fromSlot(slot);
-  if (p === null) return;
-  const cur = p.ref.readInt32Via(statsChain, matchStatsOff + field);
+function bumpStat(slot: number, field: StatField, delta: number): void {
+  if (delta === 0) return;
+  const ms = statsOf(slot);
+  if (ms === null) return;
+  const cur = ms[field];
   if (cur === null) return;
   const next = Math.max(0, cur + delta);
   if (next === cur) return;
-  if (!p.ref.writeInt32Via(statsChain, matchStatsOff + field, next)) return;
-  p.ref.notifyStateChanged(actionTrackingOff);
-
-  // Verify the very first write actually stuck. A field the engine re-derives (or an offset that
-  // reads fine but is not writable) would silently do nothing forever otherwise.
-  if (!statsWriteVerified) {
-    statsWriteVerified = true;
-    if (p.ref.readInt32Via(statsChain, matchStatsOff + field) !== next) {
-      disableStats("the first stat write did not stick");
-    }
-  }
+  ms[field] = next;
+  ms.notifyChanged();
 }
+
 
 /**
  * Undo everything the engine wrote for this death, and bank what is owed back at round end.
@@ -381,13 +222,11 @@ function rollbackDeathStats(
   assister: number,
   dmgHealth: number,
 ): void {
-  if (statsMode === StatsMode.Unknown) probeStats(victim, F_DEATHS, 1);
   // Everything below is the raw match-stats path plus the bank that mirrors it. Banking without the
   // matching subtract is worse than doing neither: a probe that only flips to Enabled later in the
   // round would then hand out kills at round end that were never taken off in the first place.
-  if (statsMode !== StatsMode.Enabled) return;
 
-  bumpStat(victim, F_DEATHS, -1);
+  bumpStat(victim, "deaths", -1);
 
   // A suicide is skipped ENTIRELY — subtract and bank alike. Every script-driven kill reaches the
   // engine through `pawn.slay()`, which reports the victim as their own attacker, so this branch is
@@ -403,17 +242,17 @@ function rollbackDeathStats(
   // victim's own kills, for good, on every gadget kill and every slay.
   if (killer >= 0 && killer !== victim) {
     bankedKills[killer] = bankedKills[killer]! + 1;
-    bumpStat(killer, F_KILLS, -1);
-    bumpStat(killer, F_DAMAGE, -dmgHealth);
+    bumpStat(killer, "kills", -1);
+    bumpStat(killer, "damage", -dmgHealth);
     // The C# zeroes utility damage outright rather than subtracting this kill's share of it.
-    setStat(killer, F_UTILITY_DAMAGE, 0);
+    setStat(killer, "utilityDamage", 0);
   }
 
   // `assisterStats != killerStats` in the C#: one player credited with both keeps the assist. Same
   // gate on both halves for the same reason as above.
   if (assister >= 0 && assister !== killer && assister !== victim) {
     bankedAssists[assister] = bankedAssists[assister]! + 1;
-    bumpStat(assister, F_ASSISTS, -1);
+    bumpStat(assister, "assists", -1);
   }
 }
 
@@ -424,8 +263,7 @@ function rollbackDeathStats(
  */
 function rollbackDamageStats(attacker: number, dmgHealth: number): void {
   if (attacker < 0 || dmgHealth <= 0) return;
-  if (statsMode === StatsMode.Unknown) probeStats(attacker, F_DAMAGE, dmgHealth);
-  bumpStat(attacker, F_DAMAGE, -dmgHealth);
+  bumpStat(attacker, "damage", -dmgHealth);
 }
 
 /** Round is over — nothing is hidden any more, so hand back everything that was withheld. */
@@ -436,12 +274,12 @@ function revealStats(): void {
     // A death nobody ever found still counts once the round is decided (the C# `revealDeaths`).
     if (!reg.isAlive(slot) && deathRevealed[slot] === 0) {
       deathRevealed[slot] = 1;
-      bumpStat(slot, F_DEATHS, 1);
+      bumpStat(slot, "deaths", 1);
     }
     const kills = bankedKills[slot]!;
-    if (kills > 0) bumpStat(slot, F_KILLS, kills);
+    if (kills > 0) bumpStat(slot, "kills", kills);
     const assists = bankedAssists[slot]!;
-    if (assists > 0) bumpStat(slot, F_ASSISTS, assists);
+    if (assists > 0) bumpStat(slot, "assists", assists);
   }
   bankedKills.fill(0);
   bankedAssists.fill(0);
@@ -467,7 +305,7 @@ export function installMatchStats(bus: EventBus<TttEvents>): void {
       const slot = ev.body.owner;
       if (slot < 0 || slot >= MAX_SLOTS || deathRevealed[slot] === 1) return;
       deathRevealed[slot] = 1;
-      bumpStat(slot, F_DEATHS, 1);
+      bumpStat(slot, "deaths", 1);
     },
     { priority: Priority.MONITOR, ignoreCanceled: true },
   );
@@ -737,7 +575,7 @@ function handleDeath(
   if (killer >= 0 && killer !== victim) {
     const killerRole = reg.roleOf(killer);
     if (killerRole !== RoleId.None) {
-      tell(victim, msg("ROLE_REVEAL_DEATH", roleName(killerRole)));
+      tell(victim, msgFor(victim, "ROLE_REVEAL_DEATH", roleName(killerRole)));
     }
   }
 

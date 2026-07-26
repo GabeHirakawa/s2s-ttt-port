@@ -17,7 +17,7 @@ import { HintText, Player } from "@s2script/cs2";
 import { TraceMask } from "@s2script/sdk/trace";
 import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
 import { cfg } from "../core/cvars";
-import { msg } from "../core/msgs";
+import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
@@ -211,7 +211,7 @@ function updateVoice(): void {
     Voice.setAudibleTo(slot, deadSlots);
     if (deadMuted[slot] === 0) {
       deadMuted[slot] = 1;
-      tell(slot, msg("DEAD_MUTE_REMINDER"));
+      tell(slot, msgFor(slot, "DEAD_MUTE_REMINDER"));
     }
   }
   // Anyone who came back alive gets handed back to the engine.
@@ -331,7 +331,7 @@ function updateAfk(dt: number): void {
     afkFor[slot] = afkFor[slot]! + dt;
     if (afkWarned[slot] === 0 && afkFor[slot]! >= limit / 2) {
       afkWarned[slot] = 1;
-      tell(slot, msg("AFK_WARNING", Math.round(limit / 2)));
+      tell(slot, msgFor(slot, "AFK_WARNING", Math.round(limit / 2)));
       continue;
     }
     if (afkFor[slot]! >= limit) {
@@ -344,7 +344,7 @@ function updateAfk(dt: number): void {
       afkFor[slot] = 0;
       afkWarned[slot] = 0;
       toSpectator(slot);
-      tell(slot, msg("AFK_MOVED"));
+      tell(slot, msgFor(slot, "AFK_MOVED"));
     }
   }
 }
@@ -448,7 +448,7 @@ export function onTeamChange(slot: number, newTeam: Team, disconnecting = false)
   if (newTeam === Team.Terrorist || newTeam === Team.CounterTerrorist) {
     if (reg.roleOf(slot) === RoleId.None) {
       toSpectator(slot);
-      tell(slot, msg("LATE_JOIN_SPECTATE"));
+      tell(slot, msgFor(slot, "LATE_JOIN_SPECTATE"));
       return;
     }
     // Already in the round: CT is this mode's "publicly confirmed innocent" signal, so a move

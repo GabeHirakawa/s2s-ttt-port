@@ -7,9 +7,9 @@
     "build": "s2s build ."
   },
   "devDependencies": {
-    "@s2script/cs2": "^0.8.0",
+    "@s2script/cs2": "^0.11.0",
     "@s2script/eslint-plugin": "^0.2.0",
-    "@s2script/sdk": "^0.10.0",
+    "@s2script/sdk": "^0.10.2",
     "eslint": "^10.7.0"
   },
   "s2script": {

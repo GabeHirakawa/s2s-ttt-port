@@ -16,7 +16,7 @@ import { ADMFLAG, Admin } from "@s2script/sdk/admin";
 import { ChatColors } from "@s2script/cs2";
 import { GameState, RoleId } from "./core/enums";
 import { cfg } from "./core/cvars";
-import { msg } from "./core/msgs";
+import { msg, msgFor } from "./core/msgs";
 import * as reg from "./core/registry";
 import { getHealth, teamOf, tellAll } from "./cs2/pawn";
 import { game, inWarmup, startGame, endGame } from "./game/game";
@@ -43,13 +43,13 @@ const VERSION = "0.1.0";
 export function registerCommands(commands: CtxCommands): void {
   commands.register("ttt", (cmd) => {
     if (cmd.arg(0).toLowerCase() !== "status") {
-      cmd.reply(msg("CMD_TTT", VERSION));
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_TTT", VERSION));
       return;
     }
     // `ttt` is a public command, but `ttt status` lists every player's ROLE — handing that to any
     // player would give away the whole game. Admins and the server console only.
     if (!isAdmin(cmd.callerSlot)) {
-      cmd.reply(msg("GENERIC_NO_PERMISSION"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_NO_PERMISSION"));
       return;
     }
 
@@ -97,7 +97,7 @@ export function registerCommands(commands: CtxCommands): void {
 
   commands.register("logs", (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Finished) {
-      cmd.reply(msg("GAME_LOGS_NONE"));
+      cmd.reply(msgFor(cmd.callerSlot, "GAME_LOGS_NONE"));
       return;
     }
     const slot = cmd.callerSlot;
@@ -106,26 +106,26 @@ export function registerCommands(commands: CtxCommands): void {
     if (slot >= 0 && reg.isAlive(slot)) {
       tellAll(msg("LOGS_VIEWED_ALIVE", reg.nameOf(slot)));
     } else if (slot >= 0) {
-      cmd.reply(msg("LOGS_VIEWED_INFO"));
+      cmd.reply(msgFor(cmd.callerSlot, "LOGS_VIEWED_INFO"));
     }
     printLogsTo(slot);
   });
 
   commands.register("karma", (cmd) => {
     if (cmd.callerSlot < 0) {
-      cmd.reply(msg("GENERIC_PLAYER_ONLY"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_PLAYER_ONLY"));
       return;
     }
-    cmd.reply(msg("KARMA_COMMAND", karmaOf(cmd.callerSlot)));
+    cmd.reply(msgFor(cmd.callerSlot, "KARMA_COMMAND", karmaOf(cmd.callerSlot)));
   });
 
   // ── shop ──────────────────────────────────────────────────────────────────
   const balance = (cmd: CommandInvocation): void => {
     if (cmd.callerSlot < 0) {
-      cmd.reply(msg("GENERIC_PLAYER_ONLY"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_PLAYER_ONLY"));
       return;
     }
-    cmd.reply(msg("COMMAND_BALANCE", balanceOf(cmd.callerSlot)));
+    cmd.reply(msgFor(cmd.callerSlot, "COMMAND_BALANCE", balanceOf(cmd.callerSlot)));
   };
 
   const list = (cmd: CommandInvocation): void => {
@@ -149,27 +149,27 @@ export function registerCommands(commands: CtxCommands): void {
   const buy = (cmd: CommandInvocation, query = cmd.argsFrom(0).trim()): void => {
     const slot = cmd.callerSlot;
     if (slot < 0) {
-      cmd.reply(msg("GENERIC_PLAYER_ONLY"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_PLAYER_ONLY"));
       return;
     }
     if (game.state !== GameState.InProgress || !reg.isAlive(slot)) {
-      cmd.reply(msg("SHOP_INACTIVE"));
+      cmd.reply(msgFor(cmd.callerSlot, "SHOP_INACTIVE"));
       return;
     }
     if (query === "") {
-      cmd.reply(msg("GENERIC_USAGE", "buy <item>"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_USAGE", "buy <item>"));
       return;
     }
 
     const item = findItem(slot, query);
     if (item === undefined) {
-      cmd.reply(msg("SHOP_ITEM_NOT_FOUND", query));
+      cmd.reply(msgFor(cmd.callerSlot, "SHOP_ITEM_NOT_FOUND", query));
       return;
     }
     if (tryPurchase(slot, item) !== PurchaseResult.Success) return;
-    cmd.reply(msg("SHOP_PURCHASED", msg(item.nameKey)));
+    cmd.reply(msgFor(cmd.callerSlot, "SHOP_PURCHASED", msgFor(cmd.callerSlot, item.nameKey)));
     const desc = msg(item.descKey);
-    if (desc !== "" && desc !== item.descKey) cmd.reply(msg("SHOP_PURCHASED_DETAIL", desc));
+    if (desc !== "" && desc !== item.descKey) cmd.reply(msgFor(cmd.callerSlot, "SHOP_PURCHASED_DETAIL", desc));
   };
 
   commands.register("balance", balance);
@@ -197,14 +197,14 @@ export function registerCommands(commands: CtxCommands): void {
         list(cmd);
         return;
       default:
-        cmd.reply(msg("GENERIC_USAGE", "shop <list|buy [item]|balance>"));
+        cmd.reply(msgFor(cmd.callerSlot, "GENERIC_USAGE", "shop <list|buy [item]|balance>"));
     }
   });
 
   // ── admin ─────────────────────────────────────────────────────────────────
   commands.registerAdmin("ttt_start", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.Waiting) {
-      cmd.reply(msg("GENERIC_ERROR", "A round is already running"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_ERROR", "A round is already running"));
       return;
     }
     startGame();
@@ -213,7 +213,7 @@ export function registerCommands(commands: CtxCommands): void {
 
   commands.registerAdmin("ttt_end", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Countdown) {
-      cmd.reply(msg("GENERIC_ERROR", "No round is running"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_ERROR", "No round is running"));
       return;
     }
     endGame(RoleId.None, "Ended by an admin");
@@ -268,7 +268,7 @@ export function registerCommands(commands: CtxCommands): void {
 
     const value = cmd.argInt(1, -1);
     if (value < 0) {
-      cmd.reply(msg("GENERIC_USAGE", "ttt_karma <slot|name> <value>"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_USAGE", "ttt_karma <slot|name> <value>"));
       return;
     }
     adminSetKarma(slot, value);
@@ -349,7 +349,7 @@ export function registerCommands(commands: CtxCommands): void {
       : roleName_ === "innocent" ? RoleId.Innocent
       : RoleId.None;
     if (slot < 0 || !reg.isConnected(slot) || role === RoleId.None) {
-      cmd.reply(msg("GENERIC_USAGE", "ttt_setrole <slot> <innocent|traitor|detective>"));
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_USAGE", "ttt_setrole <slot> <innocent|traitor|detective>"));
       return;
     }
     reg.setRole(slot, role);

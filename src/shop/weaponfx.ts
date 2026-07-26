@@ -23,7 +23,7 @@ import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { ChatColors } from "@s2script/cs2";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { n, s } from "../core/cvars";
-import { msg } from "../core/msgs";
+import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
@@ -191,7 +191,7 @@ export function onWeaponFire(slot: number, weapon: string): void {
   if (!PISTOLS.has(cls)) return;
 
   poisonShots[slot] = left - 1;
-  if (left - 1 === 0) tell(slot, msg("SHOP_ITEM_POISON_OUT"));
+  if (left - 1 === 0) tell(slot, msgFor(slot, "SHOP_ITEM_POISON_OUT"));
 }
 
 // ── poison smoke clouds ──────────────────────────────────────────────────────
@@ -328,14 +328,14 @@ export function readDna(slot: number, body: Body): void {
 
   const roleColour = rolePrefix(body.ownerRole);
   if (now - body.timeOfDeath > n("css_ttt_shop_dna_decay_time")) {
-    tell(slot, msg("SHOP_ITEM_DNA_EXPIRED", roleColour, body.ownerName));
+    tell(slot, msgFor(slot, "SHOP_ITEM_DNA_EXPIRED", roleColour, body.ownerName));
     return;
   }
   // Order matters and follows the C#: a wiped trace (`body.Killer == null`) is reported before the
   // suicide case, so Gloves still read as "no DNA" rather than "they killed themselves".
   if (body.dnaSuppressed || body.killer < 0) {
     const why = NO_DNA[(Math.random() * NO_DNA.length) | 0]!;
-    tell(slot, msg("SHOP_ITEM_DNA_SCANNED_OTHER", roleColour, body.ownerName, why));
+    tell(slot, msgFor(slot, "SHOP_ITEM_DNA_SCANNED_OTHER", roleColour, body.ownerName, why));
     return;
   }
   // `SHOP_ITEM_DNA_SCANNED_SUICIDE` in the C# is just `SCANNED_OTHER` with a fixed explanation.
@@ -346,7 +346,7 @@ export function readDna(slot: number, body: Body): void {
     );
     return;
   }
-  tell(slot, msg("SHOP_ITEM_DNA_SCANNED", roleColour, body.ownerName, body.killerName));
+  tell(slot, msgFor(slot, "SHOP_ITEM_DNA_SCANNED", roleColour, body.ownerName, body.killerName));
 }
 
 // ── grenades ─────────────────────────────────────────────────────────────────
