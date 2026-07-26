@@ -30,6 +30,10 @@ import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, tell } from "../cs2/pawn";
 import { colorCorpse, setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
+import { wrapEntity } from "@s2script/cs2";
+
+/** `RenderMode_t::kRenderTransAlpha` — 1. Confirmed against the schema enum dump. */
+const RENDER_TRANS_ALPHA = 1;
 import {
   give, resolveWeapon, weaponClass, KNIVES, PISTOLS, RIFLES, type HeldWeapon,
 } from "../cs2/inventory";
@@ -251,9 +255,12 @@ export function spendBodyPaint(slot: number, body: Body): boolean {
   // The tint IS the item. A painted corpse reads as "someone already checked this one", which is
   // what makes Innocents walk past a Traitor's kill; suppressing the identify alone is invisible.
   //
-  // C# also flipped RenderMode to kRenderTransAlpha, which has no schema equivalent here, so the
-  // `Color` input alone is as close as this gets — the same compromise `cs2/color.ts` documents.
+  // Match the C#: tint AND flip the render mode to kRenderTransAlpha, so the colour composites the
+  // way a painted body should instead of only replacing the tint. `m_nRenderMode` is a `RenderMode_t`
+  // enum — previously skipped by the codegen for want of a byte width, which is why an older comment
+  // here claimed it had no schema equivalent. It does.
   colorCorpse(body.ref, body.owner, resolvePaintColor());
+  wrapEntity("CBaseModelEntity", body.ref).renderMode = RENDER_TRANS_ALPHA;
   if (left - 1 === 0) tell(slot, msg("SHOP_ITEM_BODY_PAINT_OUT"));
   return true;
 }

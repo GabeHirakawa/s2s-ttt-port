@@ -11,42 +11,56 @@
  */
 
 import { CsItem } from "@s2script/cs2";
+import type { Weapon } from "@s2script/cs2";
 import { pawnOf } from "./pawn";
 
 /**
- * A held weapon.
+ * A held weapon. Alias of the SDK's `Weapon`, kept as a name the rest of the port already uses.
  *
- * `@s2script/cs2@0.7.5` re-exports `Weapon` from a `./weapon` module its package `files` list does
- * not ship, so the published `Weapon` type silently resolves to `any` and gives no checking. This
- * local shape documents the surface we rely on; {@link weaponClass} additionally probes at runtime
- * rather than trusting one unverified property name.
+ * This was a hand-written local interface because `@s2script/cs2` re-exported `Weapon` from a module
+ * its `files` list did not ship, so the published type resolved to `any`. Fixed upstream; the shim is
+ * gone and every field is checked again.
  */
-export interface HeldWeapon {
-  className?: string | null;
-  designerName?: string | null;
-  clip1?: number | null;
-  reserveAmmo?: number | null;
-  remove?: () => boolean;
-}
+export type HeldWeapon = Weapon;
 
 /** Which property carries the weapon's class name on this SDK build; resolved on first use. */
-let classKey: "className" | "designerName" | "" | null = null;
+let classKey: string | null = null;
 
 /**
- * The weapon's entity class (`weapon_ak47`), or "" if it cannot be read. Probes `className` then
- * `designerName` once and remembers the winner, so the steady-state cost is one property load.
+ * The weapon's entity class (`weapon_ak47`), or "" if it cannot be read.
+ *
+ * ON THIS RUNTIME IT IS ALWAYS "". An entity's class is `CEntityIdentity::m_designerName`, typed
+ * `CUtlSymbolLarge` — a string behind a pointer, which the schema codegen skips, and no SDK surface
+ * exposes it either (`Entity.findByClass` matches BY a class name but nothing reads one back). The
+ * probe below is kept because it costs one property load and would start working the moment a build
+ * exposes either name, but it is not expected to find anything today.
+ *
+ * WHAT THAT COSTS, so the degradation is not silent: every caller comparing a held weapon against a
+ * class — knife detection for backstabs, gear-slot classification, "does this player have X",
+ * shop item removal, special-round weapon rules — takes the no-match branch. Kill attribution is
+ * unaffected: `player_death` carries the weapon name as an event string, which is read directly.
+ *
+ * The fix belongs upstream: a `designerName` getter on `EntityRef`. The host can read the symbol;
+ * only the JS surface is missing.
  */
 export function weaponClass(w: HeldWeapon | null | undefined): string {
   if (w === null || w === undefined) return "";
   if (classKey === null) {
+    // Structural probe: neither name is on the typed surface, so this looks past it deliberately.
+    const probe = w as unknown as Record<string, unknown>;
     classKey =
-      typeof w.className === "string" ? "className"
-      : typeof w.designerName === "string" ? "designerName"
+      typeof probe["className"] === "string" ? "className"
+      : typeof probe["designerName"] === "string" ? "designerName"
       : "";
-    if (classKey === "") console.log("[ttt] WARN: weapon class name unavailable on this SDK build");
+    if (classKey === "") {
+      console.log(
+        "[ttt] WARN: a weapon's class name cannot be read on this runtime — knife/gear-slot/" +
+          "has-weapon/shop-removal checks will not match. Needs an EntityRef designerName getter.",
+      );
+    }
   }
   if (classKey === "") return "";
-  return (w[classKey] as string | null | undefined) ?? "";
+  return ((w as unknown as Record<string, unknown>)[classKey] as string | undefined) ?? "";
 }
 
 /** Weapons that can backstab. */
@@ -148,8 +162,12 @@ export function give(
   if (pawn === null || !pawn.isValid) return null;
   const w = pawn.giveNamedItem(resolveWeapon(className)) as HeldWeapon | null;
   if (w === null) return null;
-  if (clip !== undefined) w.clip1 = clip;
-  if (reserve !== undefined) w.reserveAmmo = reserve;
+  // `setAmmo`, not a `reserveAmmo` assignment. The local shim this file used to carry declared a
+  // `reserveAmmo` property that does not exist on `Weapon`; because the shim made the object `any`,
+  // the assignment compiled and silently did nothing, so every reserve argument here was discarded.
+  // (The SDK notes reserve itself is currently deferred pending the m_pReserveAmmo layout, so this
+  // sets the magazine reliably and asks for the reserve.)
+  if (clip !== undefined || reserve !== undefined) w.setAmmo(clip ?? w.clip1 ?? 0, reserve);
   return w;
 }
 
