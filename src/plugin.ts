@@ -52,14 +52,14 @@ import {
   startGame, syncRosterAndAnnounce, tickCountdown, tickWaiting,
 } from "./game/game";
 import { logPurchase, logRoleAssigned } from "./game/logger";
-import { roleName } from "./game/roles";
+import { clearReservedRoles, roleName } from "./game/roles";
 
 import {
   installMatchStats, invalidatePawnCache, onDamage, onDeathPre, onPlayerHurt, onSpawn,
 } from "./cs2/combat";
 import { clearBodies, precacheBodyModels } from "./cs2/bodies";
 import { initInteract, resetInteract, tickInteract } from "./cs2/interact";
-import { resetSpoof, tickSpoof } from "./cs2/spoof";
+import { reassertSpoof, resetSpoof, tickSpoof } from "./cs2/spoof";
 import { installFeedback } from "./cs2/feedback";
 import { wouldRefuseTeam } from "./game/teams";
 import { installIcons, precacheRoleModels, resetIcons } from "./cs2/icons";
@@ -225,6 +225,13 @@ export default plugin((ctx) => {
     if (game.state === GameState.Waiting && reg.playerCount() >= cfg.minPlayers) startGame();
   });
 
+  // POST player_death: put the alive flag back after the engine has written its own, in the same
+  // frame. The pre-hook cannot do this — the engine's write happens after it. See `reassertSpoof`.
+  ctx.events.on("player_death", (ev) => {
+    const victim = ev.getPlayerSlot("userid");
+    if (victim >= 0) reassertSpoof(victim);
+  });
+
   ctx.clients.onDisconnect((client) => {
     bus.emit("leave", { slot: client.slot });
     reg.removePlayer(client.slot);
@@ -348,6 +355,7 @@ export default plugin((ctx) => {
     // on the engine names here, and `resetIcons` is what puts the originals back. Seeding first
     // would cache "[T] Bob" as Bob's real name and add a bracket on every map change.
     resetIcons();
+    clearReservedRoles();
     reg.seedFromEngine();
     // Only clears the one-shot latch — the zones themselves are not spawned yet, so the removal
     // proper waits for `round_start`.
@@ -413,6 +421,7 @@ export default plugin((ctx) => {
       resetSpoof();
       // Drops the role icons and puts every tagged name back: an unload must not leave "[T] Bob".
       resetIcons();
+    clearReservedRoles();
       unmuteAll();
       reg.resetRegistry();
       bus.clear();

@@ -124,9 +124,50 @@ export function respawn(slot: number): boolean {
  * player. Here it is written once on death and once on identification; the engine only resets it
  * on respawn, which TTT controls.
  */
+/**
+ * Hold the controller's mirrored health, so the periodic mirror does not read a dead player back.
+ *
+ * `m_iPawnHealth` and `m_bPawnIsAlive` are both controller-side copies of pawn state, refreshed
+ * together by the same think. Spoofing only the alive flag meant the mirror overwrote it roughly
+ * eleven times a second for the first second after a death — measured, not guessed — and the client
+ * saw a one-frame blip each time.
+ */
+/**
+ * `LIFE_ALIVE`. The pawn's own liveness, which `IsAlive()` reads.
+ *
+ * Spoofing the CONTROLLER's mirrored flag loses: it is re-derived from the pawn roughly eleven times
+ * a second for the first second after a death (measured — a 0 every 6th frame for ~70 frames), and
+ * correcting it a frame later is what the scoreboard flicker actually is. Writing the pawn's own
+ * state instead means the mirror derives "alive" by itself and there is nothing to fight.
+ */
+const LIFE_ALIVE = 0;
+
+/** Present a dead pawn as alive to anything that derives from `lifeState` — notably the controller. */
+export function setPawnLifeStateAlive(slot: number): void {
+  const pawn = pawnOf(slot);
+  if (pawn === null || !pawn.isValid) return;
+  if (pawn.lifeState === LIFE_ALIVE) return;
+  pawn.lifeState = LIFE_ALIVE;
+}
+
+export function setPawnHealth(slot: number, value: number): void {
+  const p = Player.fromSlot(slot);
+  if (p === null) return;
+  if (p.pawnHealth === value) return;
+  p.pawnHealth = value;
+}
+
 export function setPawnIsAlive(slot: number, value: boolean): void {
   const p = Player.fromSlot(slot);
-  if (p !== null) p.pawnIsAlive = value;
+  if (p === null) return;
+  // Read first, and write ONLY on a difference.
+  //
+  // The generated setter calls notifyStateChanged on every write, so re-asserting the same value
+  // from the per-frame spoof ticker raised the replication flag ~64x a second for every hidden
+  // corpse — telling every client the field had changed when it had not. The illusion only needs a
+  // write when the ENGINE has flipped it back, which is exactly what this comparison detects.
+  if (p.pawnIsAlive === value) return;
+  p.pawnIsAlive = value;
 }
 
 /**

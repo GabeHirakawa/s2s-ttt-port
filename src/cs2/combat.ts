@@ -176,12 +176,26 @@ function statsOf(slot: number): MatchStats | null {
   return Player.fromSlot(slot)?.matchStats ?? null;
 }
 
-/** Overwrite one column and re-network it. */
-function setStat(slot: number, field: StatField, value: number): void {
+/**
+ * Apply a batch of column edits to one player and re-network ONCE.
+ *
+ * Batching is not an optimisation, it is the fix for a visible bug: a single death rewrites up to
+ * four of the killer's columns, and notifying after each one replicated four partial states in the
+ * same frame — the scoreboard flickered through them before settling. One notify per player per
+ * event means clients only ever see the finished state.
+ */
+function editStats(slot: number, edit: (ms: MatchStats) => boolean): void {
   const ms = statsOf(slot);
   if (ms === null) return;
-  ms[field] = value;
-  ms.notifyChanged();
+  if (edit(ms)) ms.notifyChanged();
+}
+
+/** Overwrite one column and re-network it. */
+function setStat(slot: number, field: StatField, value: number): void {
+  editStats(slot, (ms) => {
+    ms[field] = value;
+    return true;
+  });
 }
 
 /**
@@ -193,14 +207,18 @@ function setStat(slot: number, field: StatField, value: number): void {
  */
 function bumpStat(slot: number, field: StatField, delta: number): void {
   if (delta === 0) return;
-  const ms = statsOf(slot);
-  if (ms === null) return;
+  editStats(slot, (ms) => bump(ms, field, delta));
+}
+
+/** The floored add itself, without the networking — so a batch can apply several before notifying. */
+function bump(ms: MatchStats, field: StatField, delta: number): boolean {
+  if (delta === 0) return false;
   const cur = ms[field];
-  if (cur === null) return;
+  if (cur === null) return false;
   const next = Math.max(0, cur + delta);
-  if (next === cur) return;
+  if (next === cur) return false;
   ms[field] = next;
-  ms.notifyChanged();
+  return true;
 }
 
 
@@ -242,10 +260,14 @@ function rollbackDeathStats(
   // victim's own kills, for good, on every gadget kill and every slay.
   if (killer >= 0 && killer !== victim) {
     bankedKills[killer] = bankedKills[killer]! + 1;
-    bumpStat(killer, "kills", -1);
-    bumpStat(killer, "damage", -dmgHealth);
-    // The C# zeroes utility damage outright rather than subtracting this kill's share of it.
-    setStat(killer, "utilityDamage", 0);
+    editStats(killer, (ms) => {
+      bump(ms, "kills", -1);
+      bump(ms, "damage", -dmgHealth);
+      // The C# zeroes utility damage outright rather than subtracting this kill's share of it.
+      ms.utilityDamage = 0;
+      // Always true: the utility-damage write is unconditional, so this batch always needs a notify.
+      return true;
+    });
   }
 
   // `assisterStats != killerStats` in the C#: one player credited with both keeps the assist. Same
@@ -271,15 +293,20 @@ function revealStats(): void {
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
-    // A death nobody ever found still counts once the round is decided (the C# `revealDeaths`).
-    if (!reg.isAlive(slot) && deathRevealed[slot] === 0) {
-      deathRevealed[slot] = 1;
-      bumpStat(slot, "deaths", 1);
-    }
+    // One batch per player: three separate notifies here produced the same flicker at round end
+    // that the death path did, on everyone at once.
+    const revealDeath = !reg.isAlive(slot) && deathRevealed[slot] === 0;
+    if (revealDeath) deathRevealed[slot] = 1;
     const kills = bankedKills[slot]!;
-    if (kills > 0) bumpStat(slot, "kills", kills);
     const assists = bankedAssists[slot]!;
-    if (assists > 0) bumpStat(slot, "assists", assists);
+    if (!revealDeath && kills === 0 && assists === 0) continue;
+    editStats(slot, (ms) => {
+      let touched = false;
+      if (revealDeath) touched = bump(ms, "deaths", 1) || touched;
+      if (kills > 0) touched = bump(ms, "kills", kills) || touched;
+      if (assists > 0) touched = bump(ms, "assists", assists) || touched;
+      return touched;
+    });
   }
   bankedKills.fill(0);
   bankedAssists.fill(0);

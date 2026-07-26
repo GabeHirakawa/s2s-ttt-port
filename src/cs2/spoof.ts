@@ -14,7 +14,8 @@
  */
 
 import { MAX_SLOTS } from "../core/enums";
-import { setPawnIsAlive } from "./pawn";
+import { Player } from "@s2script/cs2";
+import { setPawnHealth, setPawnIsAlive, setPawnLifeStateAlive } from "./pawn";
 import { isConnected } from "../core/registry";
 
 /** Slots currently being spoofed as alive. */
@@ -23,11 +24,20 @@ const spoofed: number[] = [];
 const isSpoofed = new Uint8Array(MAX_SLOTS);
 
 /** Begin spoofing `slot` as alive. */
+/** The health each spoofed slot is presented as having; captured when the spoof starts. */
+const heldHealth = new Int32Array(MAX_SLOTS);
+
 export function spoofAlive(slot: number): void {
   if (slot < 0 || slot >= MAX_SLOTS || isSpoofed[slot] === 1) return;
   isSpoofed[slot] = 1;
   spoofed.push(slot);
+  // Whatever the controller last mirrored, floored at 1: this is called from the death PRE-hook, so
+  // the mirror still holds the pre-death value. A 0 here would present a living player on 0 health,
+  // which reads as dead on any scoreboard that shows it.
+  const seen = Player.fromSlot(slot)?.pawnHealth ?? 100;
+  heldHealth[slot] = seen > 0 ? seen : 100;
   setPawnIsAlive(slot, true);
+  setPawnHealth(slot, heldHealth[slot]!);
 }
 
 /** Stop spoofing `slot` and let them read as dead. */
@@ -37,6 +47,21 @@ export function unspoofAlive(slot: number): void {
   const i = spoofed.indexOf(slot);
   if (i >= 0) spoofed.splice(i, 1);
   setPawnIsAlive(slot, false);
+}
+
+/**
+ * Re-assert one slot's flag immediately after the engine has written its own.
+ *
+ * `handleDeath` spoofs from the player_death PRE-hook, which runs BEFORE the engine processes the
+ * death — so the engine then sets `pawnIsAlive` false and the value replicates that way. The
+ * per-frame ticker only puts it back on the NEXT frame, and that one-frame window is visible: the
+ * scoreboard shows the player dead and then flips back, which is exactly the death this mode exists
+ * to hide.
+ *
+ * Called from the POST hook for the same event, so the sequence completes inside one frame.
+ */
+export function reassertSpoof(slot: number): void {
+  if (spoofing(slot) && spoofingEnabled) setPawnIsAlive(slot, true);
 }
 
 /** Is this slot currently pretending to be alive? */
@@ -58,7 +83,12 @@ export function tickSpoof(): void {
       spoofed.splice(i, 1);
       continue;
     }
+    // Source first: the controller's mirror re-derives from the pawn, so correcting only the mirror
+    // is a fight it wins every 6th frame. Both are written — the pawn so the derivation produces
+    // "alive" on its own, the mirror so the current frame is right without waiting for the think.
+    setPawnLifeStateAlive(slot);
     setPawnIsAlive(slot, true);
+    setPawnHealth(slot, heldHealth[slot]!);
   }
 }
 
