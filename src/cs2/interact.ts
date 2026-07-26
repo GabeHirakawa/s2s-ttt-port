@@ -337,7 +337,8 @@ function carry(slot: number, prop: EntityRef): void {
   // reads as a body being hauled along. Props keep the plain zero-angle teleport, which is what the
   // C# `prop_physics_multiplayer` branch did.
   let deadAngles: number[] | null = null;
-  if (bodyByEntity(prop.index) !== undefined) {
+  const carriedBody = bodyByEntity(prop.index);
+  if (carriedBody !== undefined) {
     const rotDeg = (Server.gameTime * BODY_SPIN_RATE) % 360;
     const rad = rotDeg * (Math.PI / 180);
     const cos = Math.cos(rad);
@@ -350,6 +351,22 @@ function carry(slot: number, prop: EntityRef): void {
   }
 
   prop.teleport([x, y, z], deadAngles, [0, 0, 0]);
+
+  // Keep the body's cached position in step with where it actually is.
+  //
+  // Identification aim-traces with a BULLET mask, and a corpse is COLLISION_GROUP_DEBRIS — "collides
+  // with nothing but world" — so the trace deliberately passes straight through it. That is the same
+  // property that stops corpses eating shots, and it cannot be had both ways. What catches the body
+  // is the proximity fallback, which compares against these coordinates; leaving them at the death
+  // position meant a body you had DRAGGED could only be identified by standing where its owner died.
+  //
+  // (The C# never needed this: it identified through the engine's own PropPickupEvent rather than a
+  // trace, so collision group never entered into it.)
+  if (carriedBody !== undefined) {
+    carriedBody.x = x;
+    carriedBody.y = y;
+    carriedBody.z = z;
+  }
 
   const beam = carryBeam[slot];
   if (beam !== null) {
