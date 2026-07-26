@@ -1,0 +1,40 @@
+// TTT's own gamedata. CS2-specific knowledge lives HERE, in the plugin, never in the framework:
+// the byte signature, the weapon id, the argument shape. The runtime only ever sees opaque names.
+{
+  "signatures": {
+    // CHEGrenadeProjectile::Create — the engine factory that builds a live HE projectile.
+    //
+    // This is the ONLY way to get a grenade that actually detonates. `createEntity`
+    // (UTIL_CreateEntityByName) constructs `hegrenade_projectile` perfectly well and it flies and
+    // bounces, but it is inert: detonation is driven by an entity THINK, and only this factory
+    // assigns the think function. Verified live — writing m_bIsLive, m_flDetonateTime and even
+    // m_nNextThinkTick changed nothing, and the projectile accepts no `Detonate` input.
+    //
+    // NOT the pattern edgegamers/TTT ships for CHEGrenadeProjectile_CreateFunc — that one
+    // (`... 41 57 49 89 D7`) diverges from this build at the fourth instruction and does not match
+    // here. This is the prologue of the function on the pinned build.
+    "CHEGrenadeProjectile_Create": {
+      "linuxsteamrt64": {
+        "module": "libserver.so",
+        "pattern": "55 4C 89 C1 48 89 E5 41 57 49 89 FF 41 56 49 89 D6 48 89 F2 48 89 FE 41 55",
+        "resolve": "direct"
+      }
+    }
+  },
+  "calls": {
+    // Create(position, angles, velocity, velocityAngles, thrower, weaponId, team) -> entity
+    //
+    // STATIC: no receiver, hence `kind: "none"`. Seven integer-class args, one past the six SysV
+    // registers — the seventh is stack-passed. Both of those are why this could not be declared
+    // before the receiverless/arg-budget extensions.
+    //
+    // weaponId 44 is WEAPON_HEGRENADE; team is the thrower's, so the blast credits the right side.
+    "createHeGrenade": {
+      "receiver": { "kind": "none" },
+      "target":   { "kind": "signature", "name": "CHEGrenadeProjectile_Create" },
+      "args":     ["vector", "vector", "vector", "vector", "entity", "int", "int"],
+      "argNames": ["position", "angles", "velocity", "velocityAngles", "thrower", "weaponId", "team"],
+      "returns":  "entity"
+    }
+  }
+}

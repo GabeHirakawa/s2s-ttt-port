@@ -20,7 +20,11 @@
         "type": "string",
         "default": ""
       }
-    }
+    },
+    "gamedata": "gamedata/ttt.gamedata.jsonc",
+    "permissions": [
+      "engine:calls"
+    ]
   },
-  "description": "Trouble in Terrorist Town for CS2 — an s2script port of edgegamers/TTT"
+  "description": "Trouble in Terrorist Town for CS2 \u2014 an s2script port of edgegamers/TTT"
 }

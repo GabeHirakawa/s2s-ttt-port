@@ -17,17 +17,20 @@
 import { UserMessages, type UserMessageView } from "@s2script/sdk/usermessages";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { Server } from "@s2script/sdk/server";
-import { Sound } from "@s2script/sdk/sound";
+import { createEntity } from "@s2script/sdk/entity";
+import { after } from "@s2script/sdk/timers";
+import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
 import { Vector } from "@s2script/sdk/math";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
-import { ChatColors } from "@s2script/cs2";
+import { ChatColors, wrapEntity } from "@s2script/cs2";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { n, s } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
-import { pawnOf, setHealth, tell } from "../cs2/pawn";
+import { pawnOf, setHealth, teamOf, tell } from "../cs2/pawn";
+import { Engine } from "@s2script/sdk/unsafe";
 import { markGadgetKill } from "../cs2/combat";
 import { PISTOLS } from "../cs2/inventory";
 import type { Body } from "../cs2/bodies";
@@ -233,38 +236,6 @@ const SMOKE_LIFETIME = 18;
 
 const clouds: Cloud[] = [];
 
-// ── cluster grenade fragments ────────────────────────────────────────────────
-/**
- * Fragment damage falloff.
- *
- * The C# spawned real `CHEGrenadeProjectile`s and let the engine's own explosion do the damage, so
- * neither version has a config for this — there is nothing to read from a cvar. These are the port's
- * numbers, kept as they were: with the fuse and the occlusion check below, the fragments are now
- * survivable, which is what the item's counter-play depends on.
- */
-const FRAG_DAMAGE = 40;
-const FRAG_RADIUS = 250;
-/** CS2's HE fuse — the window a victim gets to break line of sight, as in the original. */
-const FRAG_FUSE = 1.5;
-/**
- * Per-fragment fuse stagger. Real fragments bounce differently and cook off a few frames apart;
- * spreading them also keeps the occlusion traces off a single frame.
- */
-const FRAG_STAGGER = 0.08;
-/** Source units/s². Used to work out where a fragment first hits the floor. */
-const GRAVITY = 800;
-/** Ceiling on live fragments — two Traitors detonating at once must not grow an array unbounded. */
-const MAX_FRAGMENTS = 128;
-
-// Packed, index-parallel: the drain runs every frame and must not allocate.
-const fragX = new Float32Array(MAX_FRAGMENTS);
-const fragY = new Float32Array(MAX_FRAGMENTS);
-const fragZ = new Float32Array(MAX_FRAGMENTS);
-const fragFuse = new Float32Array(MAX_FRAGMENTS);
-/** Who threw the HE each fragment came out of — the C# handed the thrower's pawn to every one. */
-const fragOwner = new Int32Array(MAX_FRAGMENTS).fill(-1);
-let fragCount = 0;
-
 /** Reset every per-round charge and every live world effect. */
 export function resetWeaponFx(): void {
   silentShots.fill(0);
@@ -273,8 +244,6 @@ export function resetWeaponFx(): void {
   clusterCharge.fill(0);
   lastDnaRead.clear();
   clouds.length = 0;
-  // Fragments must never cook off into the next round.
-  fragCount = 0;
 }
 
 /** Register the event-driven item behaviours. */
@@ -396,72 +365,70 @@ export function onSmokeExpired(entityId: number): void {
  *
  * The C# spawned `config.GrenadeCount` real `CHEGrenadeProjectile`s through a CounterStrikeSharp
  * signature helper (`GrenadeDataHelper.CreateGrenade`) with a circular velocity, and the engine flew
- * them, bounced them and exploded them. s2script has no projectile-construction path, so the
- * fragments are simulated: each one is placed where a grenade thrown at that velocity would first
- * hit the floor, then detonates a fuse later with a line-of-sight check. That keeps the two things
- * the item's counter-play depends on — a window to run, and cover that actually works.
+ * them, bounced them and exploded them.
+ *
+ * REAL PROJECTILES WERE TRIED HERE AND DO NOT WORK. `createEntity` is `UTIL_CreateEntityByName`, so
+ * `hegrenade_projectile` IS constructible, and the result flies and bounces correctly -- but nothing
+ * makes it go off. Writing `m_flDetonateTime` did not (a deadline nothing checks), adding
+ * `m_bIsLive` did not (neither field schedules the THINK that compares them, and entity thinks
+ * cannot be scheduled from JS), and firing a `Detonate` input did not (the entity does not accept
+ * it -- verified live: the fragments vanished on the cleanup timer without exploding). What
+ * `CHEGrenadeProjectile::Create` does that entity creation cannot is arm the grenade AND assign its
+ * THINK FUNCTION. Scheduling alone is not the missing piece either: `m_nNextThinkTick` is a plain
+ * writable schema field and setting it changed nothing, because a scheduled think with no think
+ * function assigned runs nothing. That pointer is not schema state, so no field write can reach it --
+ * this needs a shim binding for the factory, which would also restore kill credit (`m_hThrower` is
+ * read-only in the schema).
+ *
+ * So the fragments are simulated: each is placed where a grenade thrown at that velocity would first
+ * hit the floor, detonates a fuse later with a line-of-sight check, and draws its blast with a
+ * throwaway `env_explosion`. That keeps the two things the item's counter-play depends on — a window
+ * to run, and cover that actually works.
  */
+
+/** WEAPON_HEGRENADE — the weapon id `CHEGrenadeProjectile::Create` records on the projectile. */
+const WEAPON_ID_HEGRENADE = 44;
+
+/**
+ * The engine factory, resolved ONCE. Null when the descriptor failed a load-time gate — a signature
+ * miss, or `@edgegamers/ttt` not being on the operator's `engine:calls` allow-list.
+ */
+const createHeGrenade = Engine.call("createHeGrenade");
+if (createHeGrenade === null) {
+  console.log(`[ttt] WARN: cluster grenade unavailable — ${Engine.status("createHeGrenade")}`);
+}
+
 export function onHeDetonate(thrower: number, x: number, y: number, z: number): void {
   if (thrower < 0 || clusterCharge[thrower] !== 1 || !inProgress()) return;
   clusterCharge[thrower] = 0;
+  if (createHeGrenade === null) return;
+
+  const pawn = pawnOf(thrower);
+  if (pawn === null || !pawn.isValid) return;
 
   const count = n("sm_ttt_shop_clustergrenade_count");
   const throwForce = n("sm_ttt_shop_clustergrenade_throw_force");
   const upForce = n("sm_ttt_shop_clustergrenade_up_force");
+  const team = teamOf(thrower);
 
-  // Ballistic settle distance. A fragment leaves at (cos·throw, sin·throw, up) and gravity returns
-  // it to the blast plane after 2·up/g seconds, so that is how far out it is when it first lands —
-  // ~125u with the stock 250/200. This is the only honest use for `up_force`: there is no
-  // projectile to give a velocity to, and applying it as a static Z offset would just park every
-  // fragment above head height.
-  const settle = (throwForce * 2 * upForce) / GRAVITY;
-  // Trace from just above the blast so the ray does not start inside the floor.
-  const from = new Vector(x, y, z + 8);
-
-  for (let i = 0; i < count && fragCount < MAX_FRAGMENTS; i++) {
-    const angle = (2 * Math.PI * i) / count;
-    const dx = Math.cos(angle);
-    const dy = Math.sin(angle);
-
-    // Stop the fragment at the first wall, standing in for the bounce the engine gave it. The
-    // Grenade mask is world plus physics props and ignores players, which is what a thrown grenade
-    // collides with on the way out.
-    let fx = x + dx * settle;
-    let fy = y + dy * settle;
-    if (settle > 0) {
-      const wall = Trace.line(from, new Vector(fx, fy, z + 8), { mask: TraceMask.Grenade });
-      if (wall.startSolid) {
-        // The blast plane is itself inside geometry — an HE that went off flush against a wall or
-        // in a stair nose. `endPos` is then ~= `from`, so the usual pull-back would park the
-        // fragment 8u BEHIND the epicentre, inside whatever the grenade was resting on. Leave it
-        // on the epicentre; the occlusion test below is what keeps it honest either way.
-        fx = x;
-        fy = y;
-      } else if (wall.didHit) {
-        // Pull back off the surface so the fragment sits in the room, not inside the brush.
-        fx = wall.endPos.x - dx * 8;
-        fy = wall.endPos.y - dy * 8;
-      }
-    }
-
-    // Drop the fragment onto whatever it landed on. Without this every fragment is stored on the
-    // HE's detonation PLANE, which on a slope, a stair or a raised lip is inside the floor — and a
-    // detonation trace that starts in solid is a trace that can tell you nothing about cover.
-    // Reproduces the settle the ballistic model above only describes.
-    let fz = z;
-    const floor = Trace.line(
-      new Vector(fx, fy, z + 32),
-      new Vector(fx, fy, z - 256),
-      { mask: TraceMask.WorldOnly },
+  // Fired in a ring, exactly as the C# `ClusterGrenadeListener` did: a circular velocity around the
+  // epicentre, and the engine flies, bounces and detonates each one on its own fuse.
+  //
+  // Spawned 16u up so a fragment does not start inside the floor the parent grenade was resting on.
+  const origin = { x, y, z: z + 16 };
+  const zeroAngles = { x: 0, y: 0, z: 0 };
+  for (let i = 0; i < count; i++) {
+    const a = (2 * Math.PI * i) / count;
+    const velocity = { x: Math.cos(a) * throwForce, y: Math.sin(a) * throwForce, z: upForce };
+    createHeGrenade(
+      origin,
+      zeroAngles,
+      velocity,
+      zeroAngles,
+      pawn.ref,
+      WEAPON_ID_HEGRENADE,
+      team,
     );
-    if (floor.didHit && !floor.startSolid) fz = floor.endPos.z;
-
-    fragX[fragCount] = fx;
-    fragY[fragCount] = fy;
-    fragZ[fragCount] = fz;
-    fragFuse[fragCount] = FRAG_FUSE + i * FRAG_STAGGER;
-    fragOwner[fragCount] = thrower;
-    fragCount++;
   }
 }
 
@@ -472,7 +439,6 @@ export function onHeDetonate(thrower: number, x: number, y: number, z: number): 
  */
 export function tickWeaponFx(dt: number): void {
   if (clouds.length > 0) tickClouds(dt);
-  if (fragCount > 0) tickFragments(dt);
 }
 
 /** Advance every live poison cloud. */
@@ -535,68 +501,3 @@ function tickClouds(dt: number): void {
   }
 }
 
-/** Count fuses down and detonate the fragments that reach zero. */
-function tickFragments(dt: number): void {
-  const active = reg.activeSlots();
-  for (let i = fragCount - 1; i >= 0; i--) {
-    const fuse = fragFuse[i]! - dt;
-    if (fuse > 0) {
-      fragFuse[i] = fuse;
-      continue;
-    }
-    detonateFragment(fragX[i]!, fragY[i]!, fragZ[i]!, fragOwner[i]!, active);
-    // Swap-remove: fragment order carries no meaning and this keeps the drain allocation-free.
-    fragCount--;
-    fragX[i] = fragX[fragCount]!;
-    fragY[i] = fragY[fragCount]!;
-    fragZ[i] = fragZ[fragCount]!;
-    fragFuse[i] = fragFuse[fragCount]!;
-    fragOwner[i] = fragOwner[fragCount]!;
-  }
-}
-
-/** One fragment goes off: falloff damage to everyone it can actually see. */
-function detonateFragment(
-  fx: number,
-  fy: number,
-  fz: number,
-  owner: number,
-  active: readonly number[],
-): void {
-  const from = new Vector(fx, fy, fz + 8);
-
-  for (let i = 0; i < active.length; i++) {
-    const slot = active[i]!;
-    if (!reg.isAlive(slot)) continue;
-    const pawn = pawnOf(slot);
-    if (pawn === null) continue;
-    const o = pawn.origin;
-    if (o === null) continue;
-    const dx = o.x - fx;
-    const dy = o.y - fy;
-    const dz = o.z - fz;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (dist > FRAG_RADIUS) continue;
-    const damage = Math.round(FRAG_DAMAGE * (1 - dist / FRAG_RADIUS));
-    if (damage <= 0) continue;
-
-    // Cover has to work — this is the whole point of simulating fragments rather than applying a
-    // radius sweep. Chest height, world geometry only, so a teammate standing in the way does not
-    // shield you the way a wall does.
-    const los = Trace.line(from, new Vector(o.x, o.y, o.z + 36), { mask: TraceMask.WorldOnly });
-    // FAIL CLOSED. A trace that starts in solid means the fragment is buried in geometry, and
-    // "this trace can tell us nothing" must never be read as "line of sight is clear" — that is
-    // through-wall damage at the full 250u radius with no occlusion test at all, in exactly the
-    // case where a wall is most likely to be in the way. The settle trace in `onHeDetonate` is what
-    // keeps this from costing anything in normal play; when it still happens, one fragment of eight
-    // going quiet is the cheap side of the trade.
-    if (los.didHit || los.startSolid) continue;
-
-    const next = (pawn.health ?? 0) - damage;
-    // The C# fragments were real `CHEGrenadeProjectile`s built with the thrower's pawn handle, so
-    // the engine credited their kills. A direct health write credits nobody — mark it on the lethal
-    // hit only, the way `markGadgetKill` is specified.
-    if (next <= 0) markGadgetKill(slot, owner, "[Cluster Grenade]");
-    setHealth(slot, next);
-  }
-}
