@@ -10,7 +10,7 @@
  * computed once up front, and a role check is an integer compare.
  */
 
-import { RoleId } from "../core/enums";
+import { MAX_SLOTS, RoleId } from "../core/enums";
 import { cfg } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
@@ -59,6 +59,31 @@ export function detectiveTarget(n: number): number {
  * Selection prefers players who did NOT hold the role last round, with a 1-in-6 chance of ignoring
  * that preference so a small server never starves — identical to the C# `RatioBasedRole` behaviour.
  */
+/**
+ * Roles an admin has reserved for the coming round, by slot. `RoleId.None` = no reservation.
+ *
+ * Spent at the next assignment, not held: a reservation is for ONE round, so it cannot silently make
+ * someone permanently a Traitor. A role whose quota is zero that round (a Detective on a server with
+ * detectives disabled, say) simply does not come up, and the reservation is spent anyway.
+ */
+const reserved = new Int8Array(MAX_SLOTS);
+
+/** Reserve `role` for `slot`'s next assignment. `RoleId.None` cancels. */
+export function reserveRole(slot: number, role: RoleId): void {
+  if (slot < 0 || slot >= MAX_SLOTS) return;
+  reserved[slot] = role;
+}
+
+/** What `slot` has reserved, or `RoleId.None`. */
+export function reservedRoleOf(slot: number): RoleId {
+  return slot >= 0 && slot < MAX_SLOTS ? (reserved[slot]! as RoleId) : RoleId.None;
+}
+
+/** Drop every reservation — map change and unload. */
+export function clearReservedRoles(): void {
+  reserved.fill(RoleId.None);
+}
+
 export function assignRoles(bus: EventBus<TttEvents>, pool: number[]): number {
   const n = pool.length;
   if (n === 0) return 0;
@@ -102,6 +127,8 @@ function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: num
       continue;
     }
     reg.setParticipating(slot, true);
+    // One round only: a reservation is spent whether or not it was what put them here.
+    reserved[slot] = RoleId.None;
     // Team first: `switchTeam` may respawn the pawn, which would discard health/armor/weapons
     // written before it. Only the Detective actually moves here (everyone else is already on T
     // from the countdown), so at most one player pays the extra frame.
@@ -124,6 +151,14 @@ function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: num
  * escape hatch keeps role rotation from deadlocking when everyone is "fresh out".
  */
 function choose(pool: number[], role: RoleId): number {
+  // A reservation outranks the weighting: an admin who asked for this role gets it.
+  //
+  // Done HERE rather than by assigning outside the deal loop, so a reserved player goes through the
+  // identical path — the roleAssign dispatch that drives icons, uniforms, glow and loadout, and the
+  // quota accounting. Reserving Traitor therefore CONSUMES one of the round's Traitor slots rather
+  // than adding one, which is what keeps the ratios honest.
+  for (let i = 0; i < pool.length; i++) if (reserved[pool[i]!] === role) return i;
+
   if (Math.random() < 1 / 6) return (Math.random() * pool.length) | 0;
 
   // Count fresh candidates first so the pick is uniform over them without allocating a sub-array.

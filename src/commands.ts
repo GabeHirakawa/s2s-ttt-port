@@ -20,7 +20,7 @@ import { msg, msgFor } from "./core/msgs";
 import * as reg from "./core/registry";
 import { getHealth, teamOf, tellAll } from "./cs2/pawn";
 import { game, inWarmup, startGame, endGame } from "./game/game";
-import { roleName, roleNameFor } from "./game/roles";
+import { reserveRole, roleName, roleNameFor } from "./game/roles";
 import { printLogsTo } from "./game/logger";
 import { allBodies } from "./cs2/bodies";
 import { Entity } from "@s2script/sdk/entity";
@@ -78,6 +78,7 @@ export function registerCommands(commands: CtxCommands): void {
         "CMD_WORLD_ENTITIES",
         Entity.findByClass("point_worldtext").length,
         Entity.findByClass("prop_ragdoll").length,
+        Entity.findByClass("prop_dynamic").length,
       ),
     );
     const d = damageDiag;
@@ -347,6 +348,44 @@ export function registerCommands(commands: CtxCommands): void {
       }
     }
     if (shown === 0) cmd.replyToChat(msg("GAME_LOGS_NONE"));
+  });
+
+  /**
+   * `sm_ttt_myrole <role>` — reserve your own role for the next assignment. ROOT only.
+   *
+   * Deliberately separate from `sm_ttt_setrole`, which rewrites someone's role in a LIVE round: this
+   * one takes effect at the next deal, so the player goes through normal assignment and gets the
+   * icons, uniform, glow and loadout that come with it. It also consumes a slot of that role's quota
+   * rather than adding one, so the round's ratios stay honest.
+   *
+   * ROOT rather than GENERIC because choosing to be a Traitor is not moderation — it decides the
+   * round for everyone in it.
+   */
+  commands.registerAdmin("sm_ttt_myrole", ADMFLAG.ROOT, (cmd) => {
+    const me = cmd.callerSlot;
+    if (me < 0) {
+      cmd.reply(msgFor(me, "CMD_MYROLE_NO_SLOT"));
+      return;
+    }
+    const want = cmd.arg(0).toLowerCase();
+    const role =
+      want === "traitor" ? RoleId.Traitor
+      : want === "detective" ? RoleId.Detective
+      : want === "innocent" ? RoleId.Innocent
+      : want === "none" || want === "clear" ? RoleId.Spectator
+      : RoleId.None;
+    if (role === RoleId.None) {
+      cmd.reply(msgFor(me, "CMD_MYROLE_USAGE"));
+      return;
+    }
+    // `Spectator` is the sentinel for "cancel" here, not a role anyone can reserve.
+    if (role === RoleId.Spectator) {
+      reserveRole(me, RoleId.None);
+      cmd.reply(msgFor(me, "CMD_MYROLE_CLEARED"));
+      return;
+    }
+    reserveRole(me, role);
+    cmd.reply(msgFor(me, "CMD_MYROLE_SET", roleNameFor(me, role)));
   });
 
   commands.registerAdmin("sm_ttt_setrole", ADMFLAG.GENERIC, (cmd) => {

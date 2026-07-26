@@ -18,6 +18,11 @@ export const PHRASES: Readonly<Record<string, string>> = {
   /** One name in the Traitor teammate list; the leading spaces are the bullet. */
   ROLE_REVEAL_TRAITORS_ENTRY: " - {1}",
 
+  CMD_MYROLE_SET: "[ttt] you will be {1} next round.",
+  CMD_MYROLE_CLEARED: "[ttt] role reservation cleared.",
+  CMD_MYROLE_USAGE: "[ttt] usage: sm_ttt_myrole <innocent|traitor|detective|none>",
+  CMD_MYROLE_NO_SLOT: "[ttt] that command reserves a role for YOURSELF — run it in-game, not from rcon.",
+
   CMD_ROUND_STARTING: "Round starting.",
   CMD_ROUND_ENDED: "Round ended.",
   CMD_SPECIAL_AVAILABLE: "Available: {1}",
@@ -28,7 +33,7 @@ export const PHRASES: Readonly<Record<string, string>> = {
   CMD_UNKNOWN_ITEM: "[ttt] unknown item \"{1}\" — try sm_ttt_give with no arguments",
   CMD_GAVE_ITEM: "[ttt] gave {1} to {2}",
   CMD_ROLE_SET: "Set slot {1} to {2}.",
-  CMD_WORLD_ENTITIES: "[ttt] world entities: point_worldtext={1} prop_ragdoll={2}",
+  CMD_WORLD_ENTITIES: "[ttt] world entities: point_worldtext={1} prop_ragdoll={2} prop_dynamic={3}",
 
   PREFIX: "{darkred}T{red}T{lightred}T{grey} | {grey}",
   ROLE_INNOCENT: "{green}Innocent",
