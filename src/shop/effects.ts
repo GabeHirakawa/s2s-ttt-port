@@ -30,10 +30,6 @@ import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, tell } from "../cs2/pawn";
 import { colorCorpse, setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
-import { wrapEntity } from "@s2script/cs2";
-
-/** `RenderMode_t::kRenderTransAlpha` — 1. Confirmed against the schema enum dump. */
-const RENDER_TRANS_ALPHA = 1;
 import {
   give, resolveWeapon, weaponClass, KNIVES, PISTOLS, RIFLES, type HeldWeapon,
 } from "../cs2/inventory";
@@ -255,12 +251,16 @@ export function spendBodyPaint(slot: number, body: Body): boolean {
   // The tint IS the item. A painted corpse reads as "someone already checked this one", which is
   // what makes Innocents walk past a Traitor's kill; suppressing the identify alone is invisible.
   //
-  // Match the C#: tint AND flip the render mode to kRenderTransAlpha, so the colour composites the
-  // way a painted body should instead of only replacing the tint. `m_nRenderMode` is a `RenderMode_t`
-  // enum — previously skipped by the codegen for want of a byte width, which is why an older comment
-  // here claimed it had no schema equivalent. It does.
+  // Tint only, deliberately.
+  //
+  // The C# also flipped RenderMode to kRenderTransAlpha. That IS reachable now (`m_nRenderMode` is a
+  // `RenderMode_t`; an older comment here wrongly said it had no schema equivalent) — but reaching it
+  // and wanting it are different questions. kRenderTransAlpha blends against the entity's alpha, and
+  // `setEntityColor` sends only `Color`, never alpha. A corpse whose pawn was hidden with
+  // `setPawnAlpha(slot, 0)` would then composite against alpha 0 and could vanish — the exact failure
+  // this mode has already produced twice. Painting works as-is; adding the flip is only worth doing
+  // alongside an explicit opaque alpha, and only after checking it in game.
   colorCorpse(body.ref, body.owner, resolvePaintColor());
-  wrapEntity("CBaseModelEntity", body.ref).renderMode = RENDER_TRANS_ALPHA;
   if (left - 1 === 0) tell(slot, msg("SHOP_ITEM_BODY_PAINT_OUT"));
   return true;
 }
