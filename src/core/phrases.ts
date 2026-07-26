@@ -4,7 +4,7 @@
  * Syntax is unchanged from the original so an operator's existing overrides port across:
  *   `%KEY%`   — splice in another phrase (resolved once, at compile time)
  *   `{color}` — a chat colour control byte
- *   `{0}`     — positional argument
+ *   `{1}`     — positional argument
  *   `%s%`     — pluralize the preceding word against the preceding number
  *   `%an%`    — "a" or "an", chosen from the following word
  */
@@ -16,55 +16,55 @@ export const PHRASES: Readonly<Record<string, string>> = {
   // the SDK translations; they carry no %PREFIX% because they answer in a console, where the chat
   // colour bytes the prefix contains render as garbage.
   /** One name in the Traitor teammate list; the leading spaces are the bullet. */
-  ROLE_REVEAL_TRAITORS_ENTRY: " - {0}",
+  ROLE_REVEAL_TRAITORS_ENTRY: " - {1}",
 
   CMD_ROUND_STARTING: "Round starting.",
   CMD_ROUND_ENDED: "Round ended.",
-  CMD_SPECIAL_AVAILABLE: "Available: {0}",
+  CMD_SPECIAL_AVAILABLE: "Available: {1}",
   CMD_USAGE_KARMA: "[ttt] usage: sm_ttt_karma <slot|name> <value>   (also clears a karma timeout)",
   CMD_USAGE_GIVE: "[ttt] usage: sm_ttt_give <slot|name> <item-id>",
-  CMD_NO_PLAYER_MATCH: "[ttt] no connected player matching \"{0}\"",
-  CMD_ITEM_LIST: "[ttt] items: {0}",
-  CMD_UNKNOWN_ITEM: "[ttt] unknown item \"{0}\" — try sm_ttt_give with no arguments",
-  CMD_GAVE_ITEM: "[ttt] gave {0} to {1}",
-  CMD_ROLE_SET: "Set slot {0} to {1}.",
-  CMD_WORLD_ENTITIES: "[ttt] world entities: point_worldtext={0} prop_ragdoll={1}",
+  CMD_NO_PLAYER_MATCH: "[ttt] no connected player matching \"{1}\"",
+  CMD_ITEM_LIST: "[ttt] items: {1}",
+  CMD_UNKNOWN_ITEM: "[ttt] unknown item \"{1}\" — try sm_ttt_give with no arguments",
+  CMD_GAVE_ITEM: "[ttt] gave {1} to {2}",
+  CMD_ROLE_SET: "Set slot {1} to {2}.",
+  CMD_WORLD_ENTITIES: "[ttt] world entities: point_worldtext={1} prop_ragdoll={2}",
 
   PREFIX: "{darkred}T{red}T{lightred}T{grey} | {grey}",
   ROLE_INNOCENT: "{green}Innocent",
   ROLE_DETECTIVE: "{blue}Detective",
   ROLE_TRAITOR: "{red}Traitor",
   ROLE_SPECTATOR: "Spectator",
-  ROLE_ASSIGNED: "%PREFIX%You are %an% {0}{grey}!",
-  ROLE_REVEAL_DEATH: "%PREFIX%Your killer was %an% {0}{grey}!",
+  ROLE_ASSIGNED: "%PREFIX%You are %an% {1}{grey}!",
+  ROLE_REVEAL_DEATH: "%PREFIX%Your killer was %an% {1}{grey}!",
   ROLE_REVEAL_TRAITORS_HEADER: "%PREFIX%Your {red}Traitor {grey}teammates are:",
   ROLE_REVEAL_TRAITORS_NONE: "%PREFIX%You have no {red}Traitor {grey}teammates.",
-  GENERIC_UNKNOWN: "%PREFIX%{red}Unknown Command: {darkred}{0}",
+  GENERIC_UNKNOWN: "%PREFIX%{red}Unknown Command: {darkred}{1}",
   GENERIC_NO_PERMISSION: "%PREFIX%{red}You do not have permission to use this command.",
   GENERIC_PLAYER_ONLY: "%PREFIX%{red}Only players can use this.",
-  GENERIC_USAGE: "%PREFIX%Usage: {blue}{0}",
-  GENERIC_ERROR: "%PREFIX%{red}An error occurred: {darkred}{0}",
-  CMD_TTT: "%PREFIX%Game Version {yellow}{0}",
-  GAME_STATE_STARTING: "%PREFIX%{lime}The game is starting in {yellow}{0}{lime} second%s%.",
+  GENERIC_USAGE: "%PREFIX%Usage: {blue}{1}",
+  GENERIC_ERROR: "%PREFIX%{red}An error occurred: {darkred}{1}",
+  CMD_TTT: "%PREFIX%Game Version {yellow}{1}",
+  GAME_STATE_STARTING: "%PREFIX%{lime}The game is starting in {yellow}{1}{lime} second%s%.",
   GAME_STATE_STARTED:
-    "%PREFIX%{lime}Roles assigned! {grey}There {0} {darkred}{1}{red} %ROLE_TRAITOR%%s% {grey}and {green}{2} {lime}non-%ROLE_TRAITOR%%s%{grey}.",
-  GAME_STATE_ENDED_TEAM_WON: "%PREFIX%{darkblue}GAME! {default}{0}s {default}won the game!",
-  GAME_STATE_ENDED_OTHER: "%PREFIX%{blue}GAME! {default}{0}{grey}.",
+    "%PREFIX%{lime}Roles assigned! {grey}There {1} {darkred}{2}{red} %ROLE_TRAITOR%%s% {grey}and {green}{3} {lime}non-%ROLE_TRAITOR%%s%{grey}.",
+  GAME_STATE_ENDED_TEAM_WON: "%PREFIX%{darkblue}GAME! {default}{1}s {default}won the game!",
+  GAME_STATE_ENDED_OTHER: "%PREFIX%{blue}GAME! {default}{1}{grey}.",
   NOT_ENOUGH_PLAYERS:
-    "%PREFIX%{red}Game was canceled due to having fewer than {yellow}{0}{red} player%s%.",
+    "%PREFIX%{red}Game was canceled due to having fewer than {yellow}{1}{red} player%s%.",
   BODY_IDENTIFIED:
-    "%PREFIX%{default}{0}{grey} identified the body of {blue}{1}{grey}, they were %an% {2}{grey}!",
+    "%PREFIX%{default}{1}{grey} identified the body of {blue}{2}{grey}, they were %an% {3}{grey}!",
   GAME_LOGS_HEADER: "---------- Game Logs ----------",
   GAME_LOGS_FOOTER: "-------------------------------",
   GAME_LOGS_NONE: "%PREFIX%There is no game active.",
-  LOGS_VIEWED_ALIVE: "%PREFIX%{red}{0}{grey} viewed the logs while alive.",
+  LOGS_VIEWED_ALIVE: "%PREFIX%{red}{1}{grey} viewed the logs while alive.",
   LOGS_VIEWED_INFO: "%PREFIX%Logs printed to console. All players' roles have been shown.",
 
   // ── CS2 layer ─────────────────────────────────────────────────────────────
-  TRAITOR_CHAT_FORMAT: "{darkred}[TRAITORS] {red}{0}: {default}{1}",
-  TASER_SCANNED: "%PREFIX%You scanned {0}{grey}, they are %an% {1}{grey}!",
+  TRAITOR_CHAT_FORMAT: "{darkred}[TRAITORS] {red}{1}: {default}{2}",
+  TASER_SCANNED: "%PREFIX%You scanned {1}{grey}, they are %an% {2}{grey}!",
   DNA_PREFIX: "{darkblue}D{blue}N{lightblue}A{grey} | {grey}",
-  AFK_WARNING: "%PREFIX%You will be moved to spectators in {yellow}{0} second%s%{grey} for being AFK.",
+  AFK_WARNING: "%PREFIX%You will be moved to spectators in {yellow}{1} second%s%{grey} for being AFK.",
   AFK_MOVED: "%PREFIX%You were moved to spectators for being AFK.",
   LATE_JOIN_SPECTATE:
     "%PREFIX%A round is already in progress — you will join at the start of the next one.",
@@ -73,20 +73,20 @@ export const PHRASES: Readonly<Record<string, string>> = {
   // ── shop ──────────────────────────────────────────────────────────────────
   SHOP_PREFIX: "{green}SHOP {grey}| ",
   SHOP_INACTIVE: "%SHOP_PREFIX%The shop is currently closed.",
-  SHOP_ITEM_NOT_FOUND: '%SHOP_PREFIX%Could not find an item named "{default}{0}{grey}".',
+  SHOP_ITEM_NOT_FOUND: '%SHOP_PREFIX%Could not find an item named "{default}{1}{grey}".',
   SHOP_EXPLORATION: "Exploration",
   SHOP_INSUFFICIENT_BALANCE:
-    "%SHOP_PREFIX%You cannot afford {white}{0}{grey}, it costs {yellow}{1}{grey} %CREDITS_NAME%%s%, and you have {yellow}{2}{grey}.",
+    "%SHOP_PREFIX%You cannot afford {white}{1}{grey}, it costs {yellow}{2}{grey} %CREDITS_NAME%%s%, and you have {yellow}{3}{grey}.",
   SHOP_CANNOT_PURCHASE: "%SHOP_PREFIX%You cannot purchase this item.",
-  SHOP_CANNOT_PURCHASE_WITH_REASON: "%SHOP_PREFIX%You cannot purchase this item: {red}{0}{grey}.",
-  SHOP_PURCHASED: "%SHOP_PREFIX%You purchased {white}{0}{grey}.",
-  SHOP_PURCHASED_DETAIL: "%SHOP_PREFIX%{white}{0}{grey}.",
+  SHOP_CANNOT_PURCHASE_WITH_REASON: "%SHOP_PREFIX%You cannot purchase this item: {red}{1}{grey}.",
+  SHOP_PURCHASED: "%SHOP_PREFIX%You purchased {white}{1}{grey}.",
+  SHOP_PURCHASED_DETAIL: "%SHOP_PREFIX%{white}{1}{grey}.",
   SHOP_LIST_FOOTER:
-    "%SHOP_PREFIX%You are %an% {0}{grey}, you have {yellow}{1}{grey} %CREDITS_NAME%%s%.",
+    "%SHOP_PREFIX%You are %an% {1}{grey}, you have {yellow}{2}{grey} %CREDITS_NAME%%s%.",
   CREDITS_NAME: "point",
-  CREDITS_GIVEN: "%SHOP_PREFIX%{0}{1} %CREDITS_NAME%%s%",
-  CREDITS_GIVEN_REASON: "%SHOP_PREFIX%{0}{1} %CREDITS_NAME%%s% {grey}({white}{2}{grey})",
-  COMMAND_BALANCE: "%SHOP_PREFIX%You have {yellow}{0}{grey} %CREDITS_NAME%%s%.",
+  CREDITS_GIVEN: "%SHOP_PREFIX%{1}{2} %CREDITS_NAME%%s%",
+  CREDITS_GIVEN_REASON: "%SHOP_PREFIX%{1}{2} %CREDITS_NAME%%s% {grey}({white}{3}{grey})",
+  COMMAND_BALANCE: "%SHOP_PREFIX%You have {yellow}{1}{grey} %CREDITS_NAME%%s%.",
 
   // ── shop items ────────────────────────────────────────────────────────────
   SHOP_ITEM_ARMOR: "Armor with Helmet",
@@ -113,16 +113,16 @@ export const PHRASES: Readonly<Record<string, string>> = {
   SHOP_ITEM_GLOVES_DESC:
     "You can now kill without leaving DNA behind, or move bodies without IDing them",
   SHOP_ITEM_GLOVES_USED_BODY:
-    "%SHOP_PREFIX%You used your gloves to move a body without leaving DNA. ({yellow}{0}{grey}/{yellow}{1}{grey} use%s% left).",
+    "%SHOP_PREFIX%You used your gloves to move a body without leaving DNA. ({yellow}{1}{grey}/{yellow}{2}{grey} use%s% left).",
   SHOP_ITEM_GLOVES_USED_KILL:
-    "%SHOP_PREFIX%You used your gloves to kill without leaving DNA evidence. ({yellow}{0}{grey}/{yellow}{1}{grey} use%s% left).",
+    "%SHOP_PREFIX%You used your gloves to kill without leaving DNA evidence. ({yellow}{1}{grey}/{yellow}{2}{grey} use%s% left).",
   SHOP_ITEM_GLOVES_WORN_OUT: "%SHOP_PREFIX%Your gloves wore out.",
   SHOP_ITEM_DNA: "DNA Scanner",
   SHOP_ITEM_DNA_DESC: "Scan bodies to reveal the person who killed them",
   SHOP_ITEM_DNA_SCANNED:
-    "%DNA_PREFIX%You scanned {0}{1}'%s% {grey}body, their killer was {red}{2}{grey}.",
-  SHOP_ITEM_DNA_SCANNED_OTHER: "%DNA_PREFIX%You scanned {0}{1}'%s% {grey}body, {2}.",
-  SHOP_ITEM_DNA_EXPIRED: "%DNA_PREFIX%You scanned {0}{1}'%s% {grey}body, but the DNA has expired.",
+    "%DNA_PREFIX%You scanned {1}{2}'%s% {grey}body, their killer was {red}{3}{grey}.",
+  SHOP_ITEM_DNA_SCANNED_OTHER: "%DNA_PREFIX%You scanned {1}{2}'%s% {grey}body, {3}.",
+  SHOP_ITEM_DNA_EXPIRED: "%DNA_PREFIX%You scanned {1}{2}'%s% {grey}body, but the DNA has expired.",
   SHOP_ITEM_STATION_HEALTH: "Health Station",
   SHOP_ITEM_STATION_HEALTH_DESC: "The health station will heal all players around it",
   SHOP_ITEM_STATION_HURT: "Hurt Station",
@@ -135,7 +135,7 @@ export const PHRASES: Readonly<Record<string, string>> = {
   SHOP_ITEM_BODY_PAINT_OUT: "%PREFIX%You ran out of body paint.",
   SHOP_ITEM_POISON_SHOTS: "Poison Shots",
   SHOP_ITEM_POISON_SHOTS_DESC: "The next 5 shots from your {red}pistols{grey} are coated with poison",
-  SHOP_ITEM_POISON_HIT: "%PREFIX%You hit {green}{0}{grey} with a {lightpurple}poison shot{grey}.",
+  SHOP_ITEM_POISON_HIT: "%PREFIX%You hit {green}{1}{grey} with a {lightpurple}poison shot{grey}.",
   SHOP_ITEM_POISON_OUT: "%PREFIX%You are out of poison shots.",
   SHOP_ITEM_POISON_SMOKE: "Poison Smoke",
   SHOP_ITEM_POISON_SMOKE_DESC:
@@ -153,17 +153,17 @@ export const PHRASES: Readonly<Record<string, string>> = {
   SHOP_ITEM_TRIPWIRE: "Tripwire",
   SHOP_ITEM_TRIPWIRE_DESC: "The tripwire will activate once anyone crosses it",
   SHOP_ITEM_TRIPWIRE_TOOFAR: "%PREFIX%You are too far away to place the tripwire.",
-  SHOP_ITEM_TRIPWIRE_DEFUSING: "Defusing... ({0}, {1} second%s% left).",
+  SHOP_ITEM_TRIPWIRE_DEFUSING: "Defusing... ({1}, {2} second%s% left).",
   SHOP_ITEM_TRIPWIRE_DEFUSING_CANCELED: "%PREFIX%You stopped defusing the tripwire.",
 
   // ── karma ─────────────────────────────────────────────────────────────────
-  KARMA_COMMAND: "%PREFIX%You have {yellow}{0}{grey} karma.",
+  KARMA_COMMAND: "%PREFIX%You have {yellow}{1}{grey} karma.",
   KARMA_WARNING:
-    "%PREFIX%You have {red}very low{grey} karma, and have been forced to sit out for {yellow}{0} {grey}round%s%. Please make sure you read our rules!",
+    "%PREFIX%You have {red}very low{grey} karma, and have been forced to sit out for {yellow}{1} {grey}round%s%. Please make sure you read our rules!",
 
   // ── special rounds ────────────────────────────────────────────────────────
   SPECIAL_ROUND_STARTED:
-    "%PREFIX%This round is a {purple}Special Round{grey}! This round is a {lightpurple}{0}{grey} round!",
+    "%PREFIX%This round is a {purple}Special Round{grey}! This round is a {lightpurple}{1}{grey} round!",
   SPECIAL_ROUND_SPEED:
     " {yellow}SPEED{grey}: The round is faster than usual! {red}Traitors{grey} must kill to gain more time.",
   SPECIAL_ROUND_BHOP: " {yellow}BHOP{grey}: Bunny hopping is enabled! Hold jump to move faster!",

@@ -37,6 +37,24 @@ import { PHRASES } from "./phrases";
 /** The phrase-set name the SDK registers us under; also the `translations/<code>/<NAME>.phrases.json` stem. */
 const SET = "ttt";
 
+/**
+ * Args that make `Translations.translate` hand back the TEMPLATE rather than a formatted string.
+ *
+ * The SDK's formatter is unconditional: it rewrites every `{n}` to `args[n-1]`, or to "" when that
+ * argument is missing. Calling `translate(slot, key)` with no args therefore ERASES every
+ * placeholder — which silently blanked every parameterised message in this mode until it was caught
+ * by `sm_ttt_special` printing "Available:" with the list gone.
+ *
+ * Substituting each `{n}` with the literal text `{n}` is the identity transform, so the template
+ * survives intact and this file keeps doing its own substitution — which it must, because `%s%`
+ * pluralises against the number that precedes it and the `{colour}`/`%KEY%` compile step is cached
+ * per template.
+ *
+ * Sized past the highest slot any phrase uses; a phrase referencing a higher one would lose it, so
+ * that ceiling is asserted rather than trusted.
+ */
+const TEMPLATE_ARGS: readonly string[] = ["{1}", "{2}", "{3}", "{4}", "{5}", "{6}", "{7}", "{8}"];
+
 /** `{token}` → chat colour control byte. Unknown tokens are left untouched. */
 const COLORS: Readonly<Record<string, string>> = {
   default: ChatColors.Default,
@@ -117,7 +135,9 @@ function compile(source: string, slot: number): Compiled {
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     parts.push(text.slice(last, m.index));
-    slots.push(parseInt(m[1]!, 10));
+    // Phrases are 1-BASED (`{1}` is the first argument), matching SourceMod and the SDK; `args` is a
+    // plain 0-based array, so the index shifts here rather than at every call site.
+    slots.push(parseInt(m[1]!, 10) - 1);
     last = m.index + m[0].length;
   }
   parts.push(text.slice(last));
@@ -176,12 +196,12 @@ function fixPossessive(text: string): string {
  * miss signal — otherwise an unknown key would compile the literal key as if it were a phrase.
  */
 function lookup(slot: number, key: string): string | undefined {
-  const t = Translations.translate(slot, key);
+  const t = Translations.translate(slot, key, ...TEMPLATE_ARGS);
   return t === key ? undefined : t;
 }
 
 /**
- * Format a phrase for the server default language. `args` fill `{0}`, `{1}`, … in declaration order.
+ * Format a phrase for the server default language. `args` fill `{1}`, `{2}`, … in declaration order.
  *
  * @example
  * msg("SHOP_PURCHASED", item.name)
@@ -233,6 +253,23 @@ function formatNumber(v: number): string {
  */
 export function installPhrases(overrides: Record<string, string> = {}): void {
   seed = { ...PHRASES, ...overrides };
+  // A slot past TEMPLATE_ARGS would be erased by the SDK's formatter before this file ever saw it,
+  // and the symptom is a silently missing value rather than an error — so say so at load, where an
+  // operator adding a phrase to their overrides file will actually read it.
+  for (const key in seed) {
+    const text = seed[key]!;
+    let m: RegExpExecArray | null;
+    const re = /\{(\d+)\}/g;
+    while ((m = re.exec(text)) !== null) {
+      const n = parseInt(m[1]!, 10);
+      if (n < 1 || n > TEMPLATE_ARGS.length) {
+        console.log(
+          `[ttt] WARN: phrase "${key}" uses {${String(n)}}; slots are 1..${String(TEMPLATE_ARGS.length)} ` +
+            `— it will render empty`,
+        );
+      }
+    }
+  }
   compiled.clear();
   Translations.load(SET, seed);
 }
