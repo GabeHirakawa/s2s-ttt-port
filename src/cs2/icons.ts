@@ -227,8 +227,14 @@ function spawnHatPart(
   return ent;
 }
 
-/** `RenderMode_t::kRenderNone` — the model is not drawn; its glow pass still is. */
-const RENDER_NONE = 1;
+/**
+ * `RenderMode_t::kRenderNone` — the model is not drawn; its glow pass still is.
+ *
+ * 2, NOT 1. 1 is `kRenderTransAlpha`, which is why the glow still looked right with the wrong value:
+ * transparent happened to be close enough to invisible. Confirmed against the schema enum dump
+ * (kRenderNormal 0, kRenderTransAlpha 1, kRenderNone 2).
+ */
+const RENDER_NONE = 2;
 
 /** Pack an RGBA colour into the uint32 `m_clrRender` / `m_glowColorOverride` hold (R in low byte). */
 function packRgba(c: Rgb, a: number): number {

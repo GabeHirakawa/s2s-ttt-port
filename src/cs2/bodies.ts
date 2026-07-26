@@ -163,14 +163,24 @@ export function spawnBody(
   return body;
 }
 
-/** `CollisionGroup_t::COLLISION_GROUP_DEBRIS` — collides with the world, not with players or bullets. */
-const COLLISION_GROUP_DEBRIS = 6;
+/**
+ * `COLLISION_GROUP_DEBRIS` — collides with the world, not with players or bullets.
+ *
+ * 5, NOT 6. This is not a schema enum (there is no `CollisionGroup_t`), so it is cross-checked
+ * against two independent sources that agree: CounterStrikeSharp's `CollisionGroup` (implicit
+ * numbering — NONE 0, NEVER, TRIGGER, CONDITIONALLY_SOLID, DEFAULT, DEBRIS = 5) and the schema's own
+ * `ParticleCollisionGroup_t`, which mirrors the list with `PARTICLE_COLLISION_GROUP_DEBRIS = 0x5`.
+ *
+ * 6 is `COLLISION_GROUP_INTERACTIVE_DEBRIS`, which collides with everything EXCEPT other debris —
+ * players included. Using it left corpses blocking movement, i.e. it silently did nothing.
+ */
+const COLLISION_GROUP_DEBRIS = 5;
 /** `SolidType_t::SOLID_VPHYSICS` — collision comes from the physics model, which a ragdoll has. */
 const SOLID_VPHYSICS = 6;
-/** `MoveType_t::MOVETYPE_VPHYSICS` — the ragdoll simulates and settles. */
-const MOVETYPE_VPHYSICS = 9;
-/** `MoveType_t::MOVETYPE_FLY` — stops simulating, so a settled corpse stays put. */
-const MOVETYPE_FLY = 5;
+/** `MoveType_t::MOVETYPE_VPHYSICS` — the ragdoll simulates and settles. 5; 9 is MOVETYPE_LADDER. */
+const MOVETYPE_VPHYSICS = 5;
+/** `MoveType_t::MOVETYPE_FLY` — stops simulating, so a settled corpse stays put. 3; 5 is VPHYSICS. */
+const MOVETYPE_FLY = 3;
 
 /**
  * Make the corpse a piece of debris: solid to the world, transparent to players and bullets.
