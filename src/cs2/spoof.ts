@@ -15,7 +15,7 @@
 
 import { MAX_SLOTS } from "../core/enums";
 import { Player } from "@s2script/cs2";
-import { setPawnHealth, setPawnIsAlive, setPawnLifeStateAlive } from "./pawn";
+import { setPawnHealth, setPawnIsAlive, setPawnLifeStateAlive, setPawnLifeStateDead } from "./pawn";
 import { isConnected } from "../core/registry";
 
 /** Slots currently being spoofed as alive. */
@@ -46,6 +46,15 @@ export function unspoofAlive(slot: number): void {
   isSpoofed[slot] = 0;
   const i = spoofed.indexOf(slot);
   if (i >= 0) spoofed.splice(i, 1);
+  // Undo EVERY write the illusion made, in the reverse order it made them.
+  //
+  // The tick writes three things — pawn `lifeState`, the controller's `m_bPawnIsAlive` mirror, and
+  // the mirrored health — but this used to clear only the mirror flag. The pawn stayed LIFE_ALIVE
+  // with health restored, and since the controller re-derives its mirror FROM the pawn a few frames
+  // later, the flag went straight back to alive: identifying a body revealed the role but left its
+  // owner showing as alive on the scoreboard for the rest of the round.
+  setPawnLifeStateDead(slot);
+  setPawnHealth(slot, 0);
   setPawnIsAlive(slot, false);
 }
 

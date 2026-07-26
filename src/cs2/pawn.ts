@@ -141,6 +141,8 @@ export function respawn(slot: number): boolean {
  * state instead means the mirror derives "alive" by itself and there is nothing to fight.
  */
 const LIFE_ALIVE = 0;
+/** `LIFE_DEAD` — what the engine sets on a real death, and what the illusion has to put back. */
+const LIFE_DEAD = 2;
 
 /** Present a dead pawn as alive to anything that derives from `lifeState` — notably the controller. */
 export function setPawnLifeStateAlive(slot: number): void {
@@ -148,6 +150,21 @@ export function setPawnLifeStateAlive(slot: number): void {
   if (pawn === null || !pawn.isValid) return;
   if (pawn.lifeState === LIFE_ALIVE) return;
   pawn.lifeState = LIFE_ALIVE;
+}
+
+/**
+ * Put a spoofed pawn's liveness back to DEAD.
+ *
+ * The counterpart to `setPawnLifeStateAlive`, and it is not optional: lifting the illusion by
+ * clearing only the controller's `m_bPawnIsAlive` leaves the PAWN reading alive, and the controller
+ * re-derives from the pawn within a few frames and flips straight back. That is what made an
+ * identified body's owner keep showing as alive on the scoreboard.
+ */
+export function setPawnLifeStateDead(slot: number): void {
+  const pawn = pawnOf(slot);
+  if (pawn === null || !pawn.isValid) return;
+  if (pawn.lifeState === LIFE_DEAD) return;
+  pawn.lifeState = LIFE_DEAD;
 }
 
 export function setPawnHealth(slot: number, value: number): void {
