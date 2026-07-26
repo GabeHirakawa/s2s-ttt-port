@@ -110,8 +110,11 @@ export function switchTeam(slot: number, team: Team): void {
 }
 
 /** Respawn a dead player. No-op when they are already alive. */
-export function respawn(slot: number): void {
-  Player.fromSlot(slot)?.respawn();
+export function respawn(slot: number): boolean {
+  // Returns the SDK's own result rather than discarding it: `Player.respawn` reports false when the
+  // player is already alive, the ref is stale, or the Respawn descriptor failed its boot gates —
+  // and a silently-dropped false is a player who spends the whole round dead with no clue why.
+  return Player.fromSlot(slot)?.respawn() === true;
 }
 
 /**

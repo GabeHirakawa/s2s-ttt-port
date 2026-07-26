@@ -520,7 +520,7 @@ export function installHandlers(bus: EventBus<TttEvents>): void {
       // The owner stops reading as alive now that their corpse has been found.
       // Tint the corpse with the role it turned out to be, so anyone walking past afterwards can
       // see at a glance that it has been identified and what it was.
-      colorBody(body.ref, role);
+      colorBody(body.ref, body.owner, role);
 
       // The owner stops reading as alive now that their corpse has been found, and a non-Traitor
       // is publicly revealed by the move to CT.

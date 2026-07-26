@@ -17,6 +17,7 @@
  * one path here.
  */
 
+import { nextFrame } from "@s2script/sdk/timers";
 import { HookResult, Player, type HookResultValue } from "@s2script/cs2";
 // `fireToClient` lives on the engine-generic Events, not the CS2 typed overlay.
 import { Events } from "@s2script/sdk/events";
@@ -32,9 +33,9 @@ import * as reg from "../core/registry";
 import { checkEndConditions, inProgress } from "../game/game";
 import { roleName } from "../game/roles";
 import { logDamage, logDeath } from "../game/logger";
-import { removeBody, spawnBody } from "./bodies";
+import { settleBody, spawnBody } from "./bodies";
 import { clearAttributedKills, setArmor, setHealth, takeAttributedKiller, tell } from "./pawn";
-import { hidePawn, resetPawnColor } from "./color";
+import { resetPawnColor, setPawnAlpha } from "./color";
 import { spoofAlive, unspoofAlive } from "./spoof";
 import { refreshInvulnerability } from "./handlers";
 import { weaponClass, type HeldWeapon } from "./inventory";
@@ -577,13 +578,11 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
   // a `damage` listener cancelled the tick) must not survive to eat a later, unrelated death.
   const marked = pendingKiller[victim]!;
   const markedWeapon = pendingWeapon[victim]!;
-  const markedNoBody = pendingNoBody[victim] === 1;
   clearGadgetKill(victim);
   const attributed = takeAttributedKiller(victim);
 
   let killer = engineKiller;
   let cause = weapon;
-  let noBody = false;
   // Repair the attribution here, ABOVE the kill-feed refire, rather than deep inside `handleDeath`:
   // the feed, the corpse, karma, the logger, the role-reveal message and the DNA Scanner then all
   // name the same killer off this one real death event. Nothing has to emit a second, synthetic
@@ -594,14 +593,12 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
   // victim as their own attacker. That is the C#'s
   // `if (ev.Body.Killer == null || ev.Body.Killer.Id == ev.Body.OfPlayer.Id)`, and
   // `PoisonSmokeListener.OnRagdollSpawn` (PoisonSmokeListener.cs:141-144) cancels body creation
-  // under exactly the same test — which is why `noBody` is read INSIDE this branch and not on its
-  // own. Read unconditionally, a stale mark would silently swallow the corpse of a death it had
-  // nothing to do with, and a corpse nobody can find keeps the victim spoofed alive all round.
+  // under exactly the same test. The body-suppression half of that rule is deliberately NOT ported
+  // (see `handleDeath`): a corpse that never appears is indistinguishable from a broken one.
   if (killer < 0 || killer === victim) {
     if (marked >= 0) {
       killer = marked;
       if (markedWeapon !== "") cause = markedWeapon;
-      noBody = markedNoBody;
     } else if (attributed >= 0 && attributed !== victim) {
       // `pawn.attributeNextDeath` — the killer-only table, for the callers that cannot import this
       // module without closing a cycle through `handlers.ts`.
@@ -656,7 +653,7 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
     }
   }
 
-  handleDeath(bus, victim, killer, assister, cause, headshot, noBody);
+  handleDeath(bus, victim, killer, assister, cause, headshot);
   // Suppress the public broadcast: nobody else learns this player died.
   return HookResult.Handled;
 }
@@ -665,7 +662,7 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
  * Apply the TTT consequences of a death: body, alive-spoof, events, win check.
  *
  * `killer`/`weapon` are the values `onDeathPre` already resolved — the gadget repair happens up
- * there so that the kill feed sees the same answer this does. `noBody` is the Poison Smoke rule.
+ * there so that the kill feed sees the same answer this does.
  */
 function handleDeath(
   bus: EventBus<TttEvents>,
@@ -674,35 +671,65 @@ function handleDeath(
   assister: number,
   weapon: string,
   headshot: boolean,
-  noBody: boolean,
 ): void {
   const role = reg.roleOf(victim);
-  // Poison Smoke leaves no corpse: the C# cancels body creation for its victims. Skipping the spawn
-  // outright is the same outcome and leaves nothing half-registered.
-  const body = noBody
-    ? null
-    : spawnBody(
-        victim,
-        reg.nameOf(victim),
-        role,
-        killer,
-        killer >= 0 ? reg.nameOf(killer) : "",
-        weapon,
-        Server.gameTime,
-      );
+  // ALWAYS spawn a corpse. The C# suppresses body creation for Poison Smoke victims, and that rule
+  // was ported — but a suppressed corpse is indistinguishable in-game from a broken one, and
+  // finding bodies IS the mechanic. Until the suppression can be verified end-to-end in a real
+  // round it stays out: a missing corpse is a far worse failure than an extra one.
+  const body = spawnBody(
+    victim,
+    reg.nameOf(victim),
+    role,
+    killer,
+    killer >= 0 ? reg.nameOf(killer) : "",
+    weapon,
+    Server.gameTime,
+  );
 
   reg.setAlive(victim, false);
-  // Keep the victim reading as alive on every other client's scoreboard until their body is found,
-  // and hide the now-dead pawn so it is not left standing as a second, undiscoverable body.
+  // Keep the victim reading as alive on every other client's scoreboard until their body is found.
   spoofAlive(victim);
-  hidePawn(victim);
 
+  // The victim's own pawn is hidden and the tracked `prop_ragdoll` IS the corpse — the C# design,
+  // which is only now reachable.
+  //
+  // It was previously the other way round (pawn visible, ragdoll an invisible anchor) because the
+  // ragdoll never rendered. That was blamed on model residency; the real cause was that the model
+  // path named `characters/models/...`, which holds no `.vmdl` at all. With the path corrected the
+  // ragdoll renders AND has a physics representation — so it is trace-hittable and settles where the
+  // body actually comes to rest.
+  //
+  // That split is what made identification unreliable: the anchor stayed frozen at the spot the
+  // player died while the visible pawn ragdoll slid on under its own momentum, so USE had to be
+  // aimed at an invisible point on the floor instead of at the body. One entity, one position.
+  //
+  // The pawn is hidden ONLY once the corpse is known to exist. If creation failed or a `bodyCreate`
+  // listener cancelled it, the pawn stays visible: an extra body is a cosmetic flaw, no body at all
+  // breaks the mechanic the whole mode is built on.
   if (body !== null) {
     const created = bus.emit("bodyCreate", { body, canceled: false });
-    // `removeBody`, not a bare `body.ref.remove()`: dropping the entity alone leaves the record in
-    // the tracker's arrays, where `nearestBody` keeps handing it out as an invisible corpse that
-    // can still be "identified".
-    if (created.canceled) removeBody(body);
+    if (created.canceled) {
+      body.ref.remove();
+    } else {
+      // Bring the ragdoll into the world, then hide the pawn so there is exactly ONE body.
+      //
+      // The pawn is hidden inside the settle pass rather than here, and only once the ragdoll is
+      // confirmed live: hiding it up front is what produced "STILL NO CORPSES" — at that point the
+      // ragdoll was never being detached, so it did not draw, and the only visible body was the one
+      // being hidden. Ordering it this way means a corpse can never be hidden before its
+      // replacement exists.
+      const corpse = body;
+      const victimSlot = victim;
+      void nextFrame().then(() => {
+        if (!corpse.ref.isValid()) return;
+        settleBody(corpse);
+        setPawnAlpha(victimSlot, 0);
+      });
+      // Exactly ONE pass, matching the C#'s single `NextWorldUpdate(correctRagdoll)`. Extra passes
+      // at +250ms/+700ms were tried and make the corpse convulse: by then the ragdoll is simulating,
+      // so each re-teleport yanks a settling body back to its spawn point and physics fights back.
+    }
   }
 
   logDeath(victim, killer, weapon);

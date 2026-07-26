@@ -11,6 +11,7 @@
  * only for players who are actually pressing USE — typically nobody.
  */
 
+import { nextFrame } from "@s2script/sdk/timers";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Vector, forwardVector } from "@s2script/sdk/math";
 import { Server } from "@s2script/sdk/server";
@@ -232,23 +233,47 @@ function identify(slot: number, body: Body): void {
 function tryPickup(slot: number): void {
   const pawn = pawnOf(slot);
   if (pawn === null) return;
-  const hit = pawn.aimTrace({ distance: 200, mask: TraceMask.ShotPhysics });
-  if (hit === null || !hit.didHit || hit.entity === null) return;
-
-  // The body tracker is the real "is this a prop_ragdoll?" test — every corpse in the mode is one it
-  // spawned — and {@link physicsProps} stands in for the second designer-name lookup.
-  const index = hit.entity.index;
-  if (bodyByEntity(index) === undefined && !physicsProps.has(index)) return;
-
   const origin = pawn.origin;
   if (origin === null) return;
-  const dx = hit.endPos.x - origin.x;
-  const dy = hit.endPos.y - origin.y;
-  const dz = hit.endPos.z - origin.z;
-  const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-  if (dist > 200) return;
 
-  beginCarry(slot, hit.entity, Math.min(MAX_HOLD, Math.max(MIN_HOLD, dist)), hit.endPos);
+  const hit = pawn.aimTrace({ distance: 200, mask: TraceMask.ShotPhysics });
+  if (hit !== null && hit.didHit && hit.entity !== null) {
+    // The body tracker is the real "is this a prop_ragdoll?" test — every corpse in the mode is one
+    // it spawned — and {@link physicsProps} stands in for the second designer-name lookup.
+    const index = hit.entity.index;
+    if (bodyByEntity(index) !== undefined || physicsProps.has(index)) {
+      const dx = hit.endPos.x - origin.x;
+      const dy = hit.endPos.y - origin.y;
+      const dz = hit.endPos.z - origin.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist > 200) return;
+      beginCarry(slot, hit.entity, Math.min(MAX_HOLD, Math.max(MIN_HOLD, dist)), hit.endPos);
+      return;
+    }
+  }
+
+  // Fall back to proximity, exactly as identification does.
+  //
+  // A dead player's pawn is hidden (alpha 0) but KEEPS ITS COLLISION, and it sits right where the
+  // corpse is. So the aim trace often stops on an invisible obstacle instead of the ragdoll behind
+  // it, and this returned with no target — which reads in game as "some bodies can be picked up and
+  // some cannot", varying with how the ragdoll happened to come to rest against its own pawn.
+  //
+  // Identification never showed the bug because it already had this fallback; pickup did not. The
+  // trace cannot simply skip the pawns either: `ignoreEntity` takes a single entity, and there is
+  // one hidden pawn per corpse.
+  const body = nearestBody(slot, REACH_SQ);
+  if (body === undefined || !body.ref.isValid()) return;
+  const bx = body.x - origin.x;
+  const by = body.y - origin.y;
+  const bz = body.z - origin.z;
+  const bodyDist = Math.sqrt(bx * bx + by * by + bz * bz);
+  beginCarry(
+    slot,
+    body.ref,
+    Math.min(MAX_HOLD, Math.max(MIN_HOLD, bodyDist)),
+    new Vector(body.x, body.y, body.z),
+  );
 }
 
 /**
@@ -359,6 +384,19 @@ export function release(slot: number): void {
   // holding one corpse have two distinct refs.
   for (let i = 0; i < MAX_SLOTS; i++) if (carrying[i]?.index === held.index) return;
   held.acceptInput("EnableMotion");
+
+  // Zero the velocity one frame after motion comes back, or the corpse launches across the map.
+  //
+  // A carried object is teleported to a point in front of the player every frame with motion
+  // DISABLED. The physics engine still derives a velocity from that displacement, and it is a
+  // per-frame teleport delta — huge. `EnableMotion` then hands the body back to physics carrying
+  // all of it at once. The zeroing has to be deferred: `acceptInput` queues on the engine's I/O
+  // pump rather than running inline, so a teleport issued here would be overwritten when
+  // EnableMotion actually lands.
+  const dropped = held;
+  void nextFrame().then(() => {
+    if (dropped.isValid()) dropped.teleport(null, null, [0, 0, 0]);
+  });
 }
 
 /** Drop everything (round boundary / map change). */

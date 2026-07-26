@@ -29,7 +29,7 @@ import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, tell } from "../cs2/pawn";
-import { setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
+import { colorCorpse, setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
 import {
   give, resolveWeapon, weaponClass, KNIVES, PISTOLS, RIFLES, type HeldWeapon,
 } from "../cs2/inventory";
@@ -253,7 +253,7 @@ export function spendBodyPaint(slot: number, body: Body): boolean {
   //
   // C# also flipped RenderMode to kRenderTransAlpha, which has no schema equivalent here, so the
   // `Color` input alone is as close as this gets — the same compromise `cs2/color.ts` documents.
-  setEntityColor(body.ref, resolvePaintColor());
+  colorCorpse(body.ref, body.owner, resolvePaintColor());
   if (left - 1 === 0) tell(slot, msg("SHOP_ITEM_BODY_PAINT_OUT"));
   return true;
 }

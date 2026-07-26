@@ -401,7 +401,8 @@ export function tickCountdown(dt: number): void {
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
-    if (!reg.isAlive(slot) && isPlayingTeam(slot)) respawn(slot);
+    if (reg.isAlive(slot)) continue;
+    if (isPlayingTeam(slot)) respawn(slot);
   }
   reg.resyncAlive();
 }

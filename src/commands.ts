@@ -23,6 +23,7 @@ import { game, inWarmup, startGame, endGame } from "./game/game";
 import { roleName } from "./game/roles";
 import { printLogsTo } from "./game/logger";
 import { allBodies } from "./cs2/bodies";
+import { Entity } from "@s2script/sdk/entity";
 import { damageDiag } from "./cs2/combat";
 import { Voice } from "@s2script/sdk/voice";
 import { adminSetKarma, karmaOf, timeoutRemaining } from "./karma/karma";
@@ -71,6 +72,7 @@ export function registerCommands(commands: CtxCommands): void {
       `[ttt] bodies=${bodies.length} (live entities: ${live}, ` +
         `identified: ${bodies.filter((b) => b.identified).length})`,
     );
+    cmd.reply(`[ttt] world entities: point_worldtext=${Entity.findByClass("point_worldtext").length} prop_ragdoll=${Entity.findByClass("prop_ragdoll").length}`);
     const d = damageDiag;
     cmd.reply(
       `[ttt] damage: preHook=${d.hits} fallback=${d.fallbackHits} ` +

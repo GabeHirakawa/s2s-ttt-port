@@ -60,24 +60,30 @@ export function setPawnAlpha(slot: number, alpha: number): boolean {
   return setEntityAlpha(pawn.ref, alpha);
 }
 
-/**
- * Hide a dead player's pawn entirely.
- *
- * TTT spawns a ragdoll at the moment of death; without this the original pawn is left standing in
- * the world as a second, undiscoverable body, which gives the death away.
- */
-export function hidePawn(slot: number): void {
-  setPawnAlpha(slot, 0);
-}
-
 /** Restore a pawn to opaque white (round start, respawn). */
 export function resetPawnColor(slot: number): void {
   setPawnColor(slot, WHITE);
   setPawnAlpha(slot, 255);
 }
 
+/**
+ * Tint a corpse.
+ *
+ * A TTT corpse is TWO entities: the tracked `prop_ragdoll` anchor (invisible on this build — its
+ * character model never becomes resident) and the victim's own pawn ragdoll, which is the body
+ * players actually see. Tinting only the anchor is a no-op on screen, so both are coloured: the
+ * anchor for consistency if a future runtime ever renders it, the pawn because that is the one with
+ * pixels.
+ *
+ * The pawn tint is undone by `resetPawnColor` when its owner respawns.
+ */
+export function colorCorpse(ref: EntityRef, ownerSlot: number, c: Rgb): void {
+  setEntityColor(ref, c);
+  setPawnColor(ownerSlot, c);
+}
+
 /** Tint a corpse with the role its owner turned out to be. */
-export function colorBody(ref: EntityRef, role: RoleId): void {
+export function colorBody(ref: EntityRef, ownerSlot: number, role: RoleId): void {
   const c = ROLE_COLORS[role];
-  if (c !== undefined) setEntityColor(ref, c);
+  if (c !== undefined) colorCorpse(ref, ownerSlot, c);
 }

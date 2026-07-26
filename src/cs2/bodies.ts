@@ -15,22 +15,22 @@ import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
 import { RoleId } from "../core/enums";
 import { pawnOf } from "./pawn";
+import { roleModel } from "./icons";
+import { wrapEntity } from "@s2script/cs2";
 
 /**
- * Player models used for corpses.
+ * A corpse wears the uniform its owner was wearing.
  *
- * The C# build copied the victim's own model off the pawn's skeleton instance
- * (`CBodyComponent.SceneNode.GetSkeletonInstance().ModelState.ModelName`); that path is not exposed
- * through the s2script schema, so a corpse gets the stock model for the role it died in. Visually
- * this differs from the original only for players wearing non-default agents.
+ * The C# read the victim's model off the pawn's skeleton instance, which is not exposed here — but
+ * it no longer needs to be. Every player is put into a role uniform at assignment (see
+ * `icons.roleModel`), so the model a player is wearing is a pure function of their role and the
+ * corpse can reproduce it exactly rather than guessing from the team.
  *
- * These are deliberately the SAME two paths `cs2/icons.ts` dresses the living in: now that every
- * player wears a role uniform, a corpse spawned with any other model would not look like the player
- * it came from — most visibly for the Detective, whose body is the one thing everyone goes looking
- * for.
+ * This leaks nothing: Innocents and Traitors share the T uniform, and the Detective is public.
+ *
+ * These paths were previously `characters/models/...`, which contains no `.vmdl` at all — that is
+ * why the ragdoll never rendered. See the header comment on `roleModel`.
  */
-const MODEL_T = "characters/models/tm_phoenix/tm_phoenix.vmdl";
-const MODEL_CT = "characters/models/ctm_sas/ctm_sas.vmdl";
 
 /** A dead player's corpse. */
 export interface Body {
@@ -70,8 +70,8 @@ const byOwner = new Map<number, Body>();
 
 /** Register the corpse models for the current map. Call from `ctx.server.onPrecache`. */
 export function precacheBodyModels(pc: PrecacheContext): void {
-  pc.add(MODEL_T);
-  pc.add(MODEL_CT);
+  // The uniforms are registered by `precacheRoleModels`; corpses reuse exactly those two models.
+  void pc;
 }
 
 /** Every body created this round. DO NOT mutate. */
@@ -107,10 +107,7 @@ export function spawnBody(
   const origin = pawn.origin;
   if (origin === null) return null;
   const angles = pawn.angles;
-  // Picked by ROLE, exactly as `icons.ts::applyRoleModel` picks the living player's uniform. Team
-  // gives the same answer for the whole of a live round (Detective on CT, everyone else on T), but
-  // not once `revealAsInnocent` has started moving found Innocents across at the end of one.
-  const model = role === RoleId.Detective ? MODEL_CT : MODEL_T;
+  const model = roleModel(role);
 
   // One corpse per player per round: an admin respawn mid-round would otherwise leave the old
   // ragdoll behind, and a second body for the same player breaks the identification bookkeeping.
@@ -125,17 +122,17 @@ export function spawnBody(
   // equivalent. This is the order the C# `BodySpawner` used, and it needs `EntityRef.setModel`,
   // which only resolves from runtime v0.4.0 onward.
   //
-  // NOTE: the ragdoll keeps its default collision. The C# set the collision group to DEBRIS (so a
-  // corpse blocks neither movement nor bullets while staying trace-hittable); that field is not
-  // reachable through the s2script schema.
+  // Collision and movement are configured below, after the spawn — see `configureCorpsePhysics`.
   const ragdoll = createEntity("prop_ragdoll");
   if (ragdoll === null) return null;
 
-  if (!ragdoll.setModel(model)) console.log(`[ttt] WARN: corpse model rejected: ${model}`);
+  if (!ragdoll.setModel(model)) console.warn(`[ttt] corpse model rejected: ${model}`);
   if (!ragdoll.spawn({ targetname: `ttt_body_${slot}` })) {
     ragdoll.remove();
     return null;
   }
+
+  configureCorpsePhysics(ragdoll);
 
   ragdoll.teleport(
     [origin.x, origin.y, origin.z + 8],
@@ -166,14 +163,62 @@ export function spawnBody(
   return body;
 }
 
+/** `CollisionGroup_t::COLLISION_GROUP_DEBRIS` — collides with the world, not with players or bullets. */
+const COLLISION_GROUP_DEBRIS = 6;
+/** `SolidType_t::SOLID_VPHYSICS` — collision comes from the physics model, which a ragdoll has. */
+const SOLID_VPHYSICS = 6;
+/** `MoveType_t::MOVETYPE_VPHYSICS` — the ragdoll simulates and settles. */
+const MOVETYPE_VPHYSICS = 9;
+/** `MoveType_t::MOVETYPE_FLY` — stops simulating, so a settled corpse stays put. */
+const MOVETYPE_FLY = 5;
+
 /**
- * Destroy one body's ragdoll and forget it.
+ * Make the corpse a piece of debris: solid to the world, transparent to players and bullets.
  *
- * Exported because `combat.ts` has to undo a corpse a `bodyCreate` listener cancelled: removing only
- * the entity would leave the `Body` record in `bodies`/`byIndex`/`byOwner`, where `nearestBody`
- * still hands it out as an invisible, un-identifiable corpse.
+ * This is the C# `BodySpawner` block that could not be ported before. `m_nSolidType` and `m_MoveType`
+ * are ENUMS, which the codegen skipped wholesale for want of a byte width, and `m_Collision` is an
+ * embedded struct, which it skipped as a class. All three are typed fields now.
+ *
+ * Without it a corpse used default collision and behaved like a wall: it blocked movement and ate
+ * bullets, so a body lying in a doorway was cover and shooting past one was luck. DEBRIS keeps it
+ * trace-hittable — identification still works — while letting players and shots through.
+ *
+ * Both collision groups are set, matching the C#: `m_Collision.m_collisionGroup` is what the engine
+ * reads for most queries, `m_collisionAttribute.m_nCollisionGroup` is what VPhysics reads, and
+ * setting only one leaves the two disagreeing.
  */
-export function removeBody(body: Body): void {
+function configureCorpsePhysics(ref: EntityRef): void {
+  const e = wrapEntity("CRagdollProp", ref);
+  e.collision.collisionGroup = COLLISION_GROUP_DEBRIS;
+  e.collision.collisionAttribute.collisionGroup = COLLISION_GROUP_DEBRIS;
+  e.collision.solidType = SOLID_VPHYSICS;
+  e.moveType = MOVETYPE_VPHYSICS;
+}
+
+/**
+ * The `correctRagdoll` init pass, one world update after spawn.
+ *
+ * A `prop_ragdoll` comes up parented and draw-suppressed: model + `DispatchSpawn` alone leaves an
+ * entity that is invisible AND has nothing to aim-trace against. Detaching it and re-placing it at
+ * the position captured at spawn is what actually brings it into the world — this is the step the
+ * port was missing, and its absence is why hiding the victim's pawn produced no corpse at all.
+ *
+ * It re-teleports to the body's OWN spawn origin rather than tracking the pawn: the ragdoll has
+ * physics once it lands, so chasing anything after that would snap the corpse across the floor
+ * every pass. Run only in the first fraction of a second, before it has travelled.
+ */
+export function settleBody(body: Body): void {
+  if (!body.ref.isValid()) return;
+  body.ref.acceptInput("ClearParent");
+  // MOVETYPE_FLY before the teleport, exactly as `correctRagdoll` does: it takes the ragdoll out of
+  // physics simulation so the placement below is final. Simulating meant the body could still drift
+  // or be shoved after being positioned, which is what made corpses fight the settle passes.
+  wrapEntity("CRagdollProp", body.ref).moveType = MOVETYPE_FLY;
+  body.ref.teleport([body.x, body.y, body.z + 8], null, [0, 0, 0]);
+}
+
+/** Destroy one body's ragdoll and forget it. */
+function removeBody(body: Body): void {
   body.ref.remove();
   byIndex.delete(body.index);
   if (byOwner.get(body.owner) === body) byOwner.delete(body.owner);
