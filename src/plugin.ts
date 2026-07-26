@@ -71,7 +71,15 @@ import {
 import { installKarma } from "./karma/karma";
 import { initShop, itemById, refreshItems } from "./shop/shop";
 import { registerItems } from "./shop/items";
-import { installEffects, onBulletImpact, releaseC4, resetEffects, tickEffects } from "./shop/effects";
+import {
+  installEffects,
+  onBulletImpact,
+  precacheEffectModels,
+  releaseC4,
+  resetEffects,
+  tickEffects,
+  tickCompassHud,
+} from "./shop/effects";
 import { installEconomy, tickEconomy } from "./shop/economy";
 import { installSpecialRounds, tickSpecialRounds } from "./special/rounds";
 import {
@@ -347,6 +355,7 @@ export default plugin((ctx) => {
   ctx.server.onPrecache((pc) => {
     precacheBodyModels(pc);
     precacheRoleModels(pc);
+    precacheEffectModels(pc);
   });
 
   ctx.server.onMapStart(() => {
@@ -394,6 +403,9 @@ export default plugin((ctx) => {
 
     tickInteract(dt);
     tickEffects(dt);
+    // The compass HUD event paints for ONE frame, so it is re-fired every frame; the strip itself
+    // is only recomputed on the slower cadence inside tickEffects.
+    tickCompassHud();
     tickWeaponFx(dt);
     tickEconomy(dt);
     tickSpecialRounds();

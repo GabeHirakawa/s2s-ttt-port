@@ -203,7 +203,10 @@ const SPECS: readonly Spec[] = [
   // default to is 3.2u, which is smaller than a player and left both the walk-through trigger and
   // the shoot-it trigger unhittable in practice.
   S("sm_ttt_shop_tripwire_size_squared", "float", 500, "Tripwire hit-detection radius squared", 0, 100000),
-  S("sm_ttt_shop_tripwire_thickness", "float", 0.5, "Tripwire beam thickness", 0.1, 10),
+  // 2, not the C#'s 0.5. The body-carry beam in `interact.ts` renders at width 2 with the same
+  // alpha 32, and at 0.5 the wire is invisible in CS2 while its anchor props show fine — measured on
+  // a live server, where the tripwire read as "props spawned, no beam".
+  S("sm_ttt_shop_tripwire_thickness", "float", 2, "Tripwire beam thickness", 0.1, 10),
   S("sm_ttt_shop_tripwire_defuse_time", "float", 6, "Seconds to fully defuse a Tripwire", 0.1, 60),
   S("sm_ttt_shop_tripwire_defuse_rate", "float", 0.5, "Seconds between defuse ticks", 0.05, 10),
   S("sm_ttt_shop_tripwire_defuse_reward", "int", 20, "Credits for defusing a Tripwire", 0, 10000),

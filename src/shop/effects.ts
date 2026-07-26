@@ -19,8 +19,10 @@
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import { Vector } from "@s2script/sdk/math";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
-import { Sound } from "@s2script/sdk/sound";
-import { Beam, Fade, HintText, type BeamHandle } from "@s2script/cs2";
+import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
+import { Beam, Fade, HintText, Player, type BeamHandle } from "@s2script/cs2";
+// `fireToClient` is on the SDK Events, not the cs2 re-export.
+import { Events as SdkEvents } from "@s2script/sdk/events";
 import { Server } from "@s2script/sdk/server";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { b, n, s } from "../core/cvars";
@@ -149,6 +151,9 @@ interface Tripwire {
    */
   placedAt: number;
   beam: BeamHandle | null;
+  /** The two anchor props, one at each end of the wire. Either may be null if creation failed. */
+  propA: EntityRef | null;
+  propB: EntityRef | null;
   ax: number; ay: number; az: number;
   bx: number; by: number; bz: number;
   /** Seconds until it arms. */
@@ -161,8 +166,58 @@ interface Tripwire {
   alive: boolean;
 }
 
-/** Decoration model for a station. Precached at map start; a miss degrades to an invisible station. */
+/**
+ * Station and tripwire models — the C#'s own choices (`StationItem`, `TripwireItem`).
+ *
+ * These need PRECACHING to render, and precaching them only started working once the runtime added
+ * the game session manifest. Before that both spawned as the pink-and-black ERROR box: they are
+ * present in `pak01_dir.vpk`, `PrecacheContext.add` returned true, and the engine still refused them
+ * at spawn with "requested but is not in the system (Missing from a manifest?)". The adds were going
+ * to the wrong manifest — the one `CGameRulesGameSystem::OnPrecacheResource` hands out, which does not
+ * govern residency. `add` returning true means only that the string was accepted; it returned true for
+ * a path with no file behind it too, so its result carries no information.
+ *
+ * Both stations share one model, as in the C# (`StationItem` is the base for heal and hurt alike).
+ */
 const STATION_MODEL = "models/props/cs_office/microwave.vmdl";
+const TRIPWIRE_MODEL = "models/generic/conveyor_control_panel_01/conveyor_button_02.vmdl";
+
+/**
+ * Register this module's models for the current map. Call from `ctx.server.onPrecache`.
+ *
+ * The return value is checked rather than discarded: `add` reports whether the engine ACCEPTED the
+ * resource into the session manifest, and a refused add is the difference between a model and a
+ * pink-and-black error box. The engine's own complaint ("requested but is not in the system, missing
+ * from a manifest?") arrives much later, at spawn time, with nothing tying it back to here.
+ */
+export function precacheEffectModels(pc: PrecacheContext): void {
+  const models = [STATION_MODEL, TRIPWIRE_MODEL];
+  for (let i = 0; i < models.length; i++) {
+    const path = models[i]!;
+    if (!pc.add(path)) console.log(`[ttt] WARN: precache refused ${path}`);
+  }
+}
+
+/**
+ * One tripwire anchor prop, placed against the surface at `(x, y, z)`.
+ *
+ * SPAWN FIRST, THEN `setModel`. The C# carries the reason verbatim: `SetModel` routes through
+ * `SetupModel`, which asserts the entity is no longer in the staging list, and only `DispatchSpawn`
+ * clears that. Setting this particular (skeletal) model while staged hard-crashes the server in the
+ * C#; here it logs an assertion and leaves the prop modelless, which looks exactly like the prop not
+ * existing at all.
+ */
+function spawnTripwireProp(x: number, y: number, z: number, name: string): EntityRef | null {
+  const prop = createEntity("prop_dynamic");
+  if (prop === null) return null;
+  if (!prop.spawn({ targetname: name })) {
+    prop.remove();
+    return null;
+  }
+  prop.setModel(TRIPWIRE_MODEL);
+  prop.teleport([x, y, z], null, null);
+  return prop;
+}
 
 /** C# `StationItem.PROP_SIZE_SQUARED` — how close a bullet must land to count as hitting a station. */
 const STATION_HIT_DIST_SQ = 700;
@@ -606,19 +661,39 @@ export function placeTripwire(slot: number): boolean {
   const dz = first.endPos.z - o.z;
   if (dx * dx + dy * dy + dz * dz > n("sm_ttt_shop_tripwire_max_distance_squared")) return false;
 
-  // Continue past the first surface to find the wall opposite, giving the wire its span.
-  const dirLen = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
-  const start = new Vector(first.endPos.x, first.endPos.y, first.endPos.z);
+  // Span the gap along the SURFACE NORMAL, not along the player's aim.
+  //
+  // The C# takes `originTrace.Normal.toAngle()` and traces from the hit point in that direction, so
+  // the wire runs perpendicular to the surface it is stuck to and reaches the wall opposite — which
+  // is what strings a wire across a doorway. Following the AIM direction instead continues straight
+  // INTO the wall just hit, so the second trace ends where it began, `end` collapses onto `start`,
+  // and the beam is zero length: the anchor props appear and no wire is ever visible.
+  //
+  // Started 2u off the surface so the ray does not begin inside the brush it is leaving.
+  const nrm = first.normal;
+  const nLen = Math.sqrt(nrm.x * nrm.x + nrm.y * nrm.y + nrm.z * nrm.z) || 1;
+  const nx = nrm.x / nLen;
+  const ny = nrm.y / nLen;
+  const nz = nrm.z / nLen;
+  const start = new Vector(
+    first.endPos.x + nx * 2,
+    first.endPos.y + ny * 2,
+    first.endPos.z + nz * 2,
+  );
   const far = Trace.line(
     start,
     new Vector(
-      start.x + (dx / dirLen) * 512,
-      start.y + (dy / dirLen) * 512,
-      start.z + (dz / dirLen) * 512,
+      start.x + nx * 512,
+      start.y + ny * 512,
+      start.z + nz * 512,
     ),
     { mask: TraceMask.WorldOnly },
   );
-  const end = far.didHit ? far.endPos : new Vector(start.x, start.y, start.z + 64);
+  // Nothing opposite within 512u (an open area): run the wire out along the normal anyway rather
+  // than straight up, so it still spans something the player can walk into.
+  const end = far.didHit
+    ? far.endPos
+    : new Vector(start.x + nx * 128, start.y + ny * 128, start.z + nz * 128);
 
   const color: [number, number, number, number] = [
     n("sm_ttt_shop_tripwire_color_r"),
@@ -627,15 +702,23 @@ export function placeTripwire(slot: number): boolean {
     n("sm_ttt_shop_tripwire_color_a"),
   ];
   const beam = Beam.draw(start, end, { color, width: n("sm_ttt_shop_tripwire_thickness") });
-  // The C# emitted the wire's whole audible life from its `prop_dynamic`; this port has no prop, so
-  // the beam entity is the sound source. Only positional emits — an entity-less `Sound.emit` is a
-  // global 2D broadcast, which would tell the whole server a wire just went down.
-  if (beam !== null) Sound.emit(SND_TRIPWIRE_PLACE, { entity: beam.ref });
+
+  // An anchor at each end, as in the C#: the wire is two panels with a beam strung between them.
+  const propA = spawnTripwireProp(start.x, start.y, start.z, `ttt_tripwire_a_${slot}`);
+  const propB = spawnTripwireProp(end.x, end.y, end.z, `ttt_tripwire_b_${slot}`);
+
+  // The C# emitted the wire's whole audible life from its `prop_dynamic`, so prefer the prop and
+  // fall back to the beam. Only positional emits — an entity-less `Sound.emit` is a global 2D
+  // broadcast, which would tell the whole server a wire just went down.
+  const speaker = propA ?? (beam === null ? null : beam.ref);
+  if (speaker !== null) Sound.emit(SND_TRIPWIRE_PLACE, { entity: speaker });
 
   tripwires.push({
     owner: slot,
     placedAt: Server.gameTime,
     beam,
+    propA,
+    propB,
     ax: start.x, ay: start.y, az: start.z,
     bx: end.x, by: end.y, bz: end.z,
     arming: n("sm_ttt_shop_tripwire_initiation_time"),
@@ -674,6 +757,8 @@ function tickTripwires(dt: number): void {
     const tw = tripwires[i]!;
     if (!tw.alive) {
       tw.beam?.remove();
+      tw.propA?.remove();
+      tw.propB?.remove();
       tripwires.splice(i, 1);
       continue;
     }
@@ -914,6 +999,37 @@ function tickPoison(dt: number): void {
 // ── compass ──────────────────────────────────────────────────────────────────
 let compassAccum = 0;
 
+/**
+ * The last strip rendered for each slot, and the frame-driven re-send.
+ *
+ * `show_survival_respawn_status` is painted by CS2 for a SINGLE FRAME, so a HUD built on it has to be
+ * re-fired every frame or it never appears. The strip itself is only recomputed on the 0.25s cadence
+ * below — recomputing per frame would run the target search 64 times more often for no visible gain.
+ */
+const compassText: string[] = new Array<string>(MAX_SLOTS).fill("");
+
+/**
+ * Re-send every live compass strip. Called from the plugin's per-frame handler.
+ *
+ * The centre-screen route is a GAME EVENT fired to one client, not a user message. `HintText.to`
+ * (CUserMessageTextMsg) was used here and displayed nothing: its `param` field is REPEATED, and the
+ * message builder's scalar `setString` silently no-opped on it, so a message with no text at all went
+ * out and `send()` still reported success because delivery had happened.
+ */
+export function tickCompassHud(): void {
+  for (let slot = 0; slot < MAX_SLOTS; slot++) {
+    const text = compassText[slot]!;
+    if (text === "") continue;
+    const p = Player.fromSlot(slot);
+    if (p === null) continue;
+    SdkEvents.fireToClient(slot, "show_survival_respawn_status", {
+      loc_token: text,
+      duration: 1,
+      userid: p.userId,
+    });
+  }
+}
+
 /** Filler cell — the C# `TextCompass` default. */
 const COMPASS_FILLER = "·";
 /** Reused strip buffer; reallocated only when the configured width changes. */
@@ -943,7 +1059,10 @@ function tickCompass(dt: number): void {
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
     const mode = compass[slot]! as CompassMode;
-    if (mode === CompassMode.Off || !reg.isAlive(slot)) continue;
+    if (mode === CompassMode.Off || !reg.isAlive(slot)) {
+      compassText[slot] = "";
+      continue;
+    }
 
     const pawn = pawnOf(slot);
     if (pawn === null) continue;
@@ -985,7 +1104,10 @@ function tickCompass(dt: number): void {
         bestSq = d; tx = body.x; ty = body.y; found = true;
       }
     }
-    if (!found) continue;
+    if (!found) {
+      compassText[slot] = "";
+      continue;
+    }
 
     // `AdjustGameAngle`: game yaw (0 = +X, counter-clockwise) → compass bearing (0 = North,
     // clockwise). Applied to viewer and target alike, so the two mostly cancel — what it really
@@ -1001,7 +1123,10 @@ function tickCompass(dt: number): void {
     place(compassBuf, fov, start, 270, "W");
     place(compassBuf, fov, start, targetYaw, "X");
 
-    HintText.to(slot, `${compassBuf.join("")} ${distanceBand(Math.sqrt(bestSq))}`);
+    // Monospace so the strip's cells line up; the glyphs are meaningless if they drift.
+    compassText[slot] =
+      `<font class='fontSize-m' color='#ffcc00'>${compassBuf.join("")}</font>` +
+      `<br><font class='fontSize-s' color='#cccccc'>${distanceBand(Math.sqrt(bestSq))}</font>`;
   }
 }
 
@@ -1083,7 +1208,12 @@ export function resetEffects(): void {
 
   for (let i = 0; i < stations.length; i++) stations[i]!.ref?.remove();
   stations.length = 0;
-  for (let i = 0; i < tripwires.length; i++) tripwires[i]!.beam?.remove();
+  for (let i = 0; i < tripwires.length; i++) {
+    const tw = tripwires[i]!;
+    tw.beam?.remove();
+    tw.propA?.remove();
+    tw.propB?.remove();
+  }
   tripwires.length = 0;
 }
 
