@@ -68,15 +68,6 @@ import { ROLE_COLORS, type Rgb } from "./color";
 import { pawnOf } from "./pawn";
 
 /**
- * Role uniforms.
- *
- * The C# paths were `agents/models/...`, which is the pre-CS2 layout; the port already ships
- * `characters/models/tm_phoenix/tm_phoenix.vmdl` for corpses and that one is exercised at runtime,
- * so both uniforms use the same prefix. An unresolvable path yields an error model, which is worse
- * than leaving the player's own agent alone — hence the rejection warning.
- */
-
-/**
  * Height above the pawn ORIGIN (its feet) that the icon is CENTRED on.
  *
  * The C# `TextSpawner.spawnHatPart` used 72 and that reads as "head height", but it is not where the
@@ -228,13 +219,20 @@ function spawnHatPart(
 }
 
 /**
- * `RenderMode_t::kRenderNone` — the model is not drawn; its glow pass still is.
+ * `RenderMode_t::kRenderTransAlpha` — the value that hides the glow props while still drawing an
+ * outline. VERIFIED ON A LIVE SERVER; do not "correct" it to `kRenderNone`.
  *
- * 2, NOT 1. 1 is `kRenderTransAlpha`, which is why the glow still looked right with the wrong value:
- * transparent happened to be close enough to invisible. Confirmed against the schema enum dump
- * (kRenderNormal 0, kRenderTransAlpha 1, kRenderNone 2).
+ * The tempting change is 1 -> 2, because the schema enum dump says `kRenderNone = 2` and this code
+ * wants the model not drawn. That change was made once (b65c5db, "Fix four wrong engine constants")
+ * and it silently killed the feature for hours: at 2 the engine drops the entity from rendering
+ * altogether and takes the glow pass with it, so every `CGlowProperty` field reads back exactly as
+ * written — `glowing=true type=3 range=5000` — and nothing appears on screen. There is no error, no
+ * assertion and no log line; the only symptom is an outline nobody can see.
+ *
+ * The enum dump is right about the NAME and says nothing about which render mode still participates
+ * in the glow pass. That is an engine behaviour, and the only authority for it is the screen.
  */
-const RENDER_NONE = 2;
+const RENDER_TRANS_ALPHA = 1;
 
 /** Pack an RGBA colour into the uint32 `m_clrRender` / `m_glowColorOverride` hold (R in low byte). */
 function packRgba(c: Rgb, a: number): number {
@@ -296,8 +294,8 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
   const relayFields = wrapEntity("CBaseModelEntity", relay);
   const glowFields = wrapEntity("CBaseModelEntity", glow);
 
-  relayFields.renderMode = RENDER_NONE;
-  glowFields.renderMode = RENDER_NONE;
+  relayFields.renderMode = RENDER_TRANS_ALPHA;
+  glowFields.renderMode = RENDER_TRANS_ALPHA;
 
   const g = glowFields.glow;
   g.glowColorOverride = packRgba(c, 255);
