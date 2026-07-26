@@ -23,11 +23,21 @@ import { nextFrame } from "@s2script/sdk/timers";
 
 /** The display name for a role, resolved through the phrase table. */
 export function roleName(role: RoleId): string {
+  return roleNameFor(-1, role);
+}
+
+/**
+ * The role's display name in `slot`'s language.
+ *
+ * Use this wherever the result is substituted into a per-player message: a translated sentence with
+ * an English role name inside it is worse than either alone.
+ */
+export function roleNameFor(slot: number, role: RoleId): string {
   switch (role) {
-    case RoleId.Innocent: return msg("ROLE_INNOCENT");
-    case RoleId.Traitor: return msg("ROLE_TRAITOR");
-    case RoleId.Detective: return msg("ROLE_DETECTIVE");
-    case RoleId.Spectator: return msg("ROLE_SPECTATOR");
+    case RoleId.Innocent: return msgFor(slot, "ROLE_INNOCENT");
+    case RoleId.Traitor: return msgFor(slot, "ROLE_TRAITOR");
+    case RoleId.Detective: return msgFor(slot, "ROLE_DETECTIVE");
+    case RoleId.Spectator: return msgFor(slot, "ROLE_SPECTATOR");
     default: return "";
   }
 }
@@ -132,7 +142,7 @@ function choose(pool: number[], role: RoleId): number {
 
 /** Apply a role's health, armor and starting weapons, and tell the player what they are. */
 export function applyLoadout(slot: number, role: RoleId): void {
-  tell(slot, msgFor(slot, "ROLE_ASSIGNED", roleName(role)));
+  tell(slot, msgFor(slot, "ROLE_ASSIGNED", roleNameFor(slot, role)));
 
   if (cfg.stripOnAssign) stripAll(slot);
 
@@ -158,17 +168,18 @@ export function revealTraitorBuddies(): void {
     if (reg.roleOf(slot) === RoleId.Traitor && reg.isAlive(slot)) traitors.push(slot);
   }
 
-  const grey = msg("ROLE_REVEAL_TRAITORS_HEADER");
   for (let i = 0; i < traitors.length; i++) {
     const me = traitors[i]!;
     if (traitors.length === 1) {
       tell(me, msgFor(me, "ROLE_REVEAL_TRAITORS_NONE"));
       continue;
     }
-    tell(me, grey);
+    // Formatted per RECIPIENT, not once outside the loop: the header was being rendered in the
+    // server's language and sent to everyone, which defeats the point of per-client translation.
+    tell(me, msgFor(me, "ROLE_REVEAL_TRAITORS_HEADER"));
     for (let j = 0; j < traitors.length; j++) {
       if (j === i) continue;
-      tell(me, ` - ${reg.nameOf(traitors[j]!)}`);
+      tell(me, msgFor(me, "ROLE_REVEAL_TRAITORS_ENTRY", reg.nameOf(traitors[j]!)));
     }
   }
 }

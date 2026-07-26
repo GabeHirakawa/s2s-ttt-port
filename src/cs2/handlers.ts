@@ -415,11 +415,14 @@ export function handleChat(slot: number, text: string): HookResultValue | void {
   const body = text.slice(1).trim();
   if (body === "") return HookResult.Handled;
 
-  const line = msg("TRAITOR_CHAT_FORMAT", reg.nameOf(slot), body);
+  // Formatted per RECIPIENT: the relay wrapper is translatable even though the body is the
+  // player's own typed text, and rendering it once would send everyone the server's language.
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const other = active[i]!;
-    if (reg.roleOf(other) === RoleId.Traitor) tell(other, line);
+    if (reg.roleOf(other) === RoleId.Traitor) {
+      tell(other, msgFor(other, "TRAITOR_CHAT_FORMAT", reg.nameOf(slot), body));
+    }
   }
   return HookResult.Handled;
 }

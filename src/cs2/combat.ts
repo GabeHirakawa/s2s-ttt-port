@@ -30,7 +30,7 @@ import { Priority, type EventBus } from "../core/bus";
 import { sharedDamage, type TttEvents } from "../core/events";
 import * as reg from "../core/registry";
 import { checkEndConditions, inProgress } from "../game/game";
-import { roleName } from "../game/roles";
+import { roleName, roleNameFor } from "../game/roles";
 import { logDamage, logDeath } from "../game/logger";
 import { settleBody, spawnBody } from "./bodies";
 import { clearAttributedKills, setArmor, setHealth, takeAttributedKiller, tell } from "./pawn";
@@ -575,7 +575,7 @@ function handleDeath(
   if (killer >= 0 && killer !== victim) {
     const killerRole = reg.roleOf(killer);
     if (killerRole !== RoleId.None) {
-      tell(victim, msgFor(victim, "ROLE_REVEAL_DEATH", roleName(killerRole)));
+      tell(victim, msgFor(victim, "ROLE_REVEAL_DEATH", roleNameFor(victim, killerRole)));
     }
   }
 

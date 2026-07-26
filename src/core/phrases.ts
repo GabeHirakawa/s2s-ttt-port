@@ -11,6 +11,25 @@
 
 export const PHRASES: Readonly<Record<string, string>> = {
   // ── core ──────────────────────────────────────────────────────────────────
+  // --- admin command replies -------------------------------------------------
+  // Console/rcon output for the sm_ttt_* commands. These were hardcoded English until the move to
+  // the SDK translations; they carry no %PREFIX% because they answer in a console, where the chat
+  // colour bytes the prefix contains render as garbage.
+  /** One name in the Traitor teammate list; the leading spaces are the bullet. */
+  ROLE_REVEAL_TRAITORS_ENTRY: " - {0}",
+
+  CMD_ROUND_STARTING: "Round starting.",
+  CMD_ROUND_ENDED: "Round ended.",
+  CMD_SPECIAL_AVAILABLE: "Available: {0}",
+  CMD_USAGE_KARMA: "[ttt] usage: sm_ttt_karma <slot|name> <value>   (also clears a karma timeout)",
+  CMD_USAGE_GIVE: "[ttt] usage: sm_ttt_give <slot|name> <item-id>",
+  CMD_NO_PLAYER_MATCH: "[ttt] no connected player matching \"{0}\"",
+  CMD_ITEM_LIST: "[ttt] items: {0}",
+  CMD_UNKNOWN_ITEM: "[ttt] unknown item \"{0}\" — try sm_ttt_give with no arguments",
+  CMD_GAVE_ITEM: "[ttt] gave {0} to {1}",
+  CMD_ROLE_SET: "Set slot {0} to {1}.",
+  CMD_WORLD_ENTITIES: "[ttt] world entities: point_worldtext={0} prop_ragdoll={1}",
+
   PREFIX: "{darkred}T{red}T{lightred}T{grey} | {grey}",
   ROLE_INNOCENT: "{green}Innocent",
   ROLE_DETECTIVE: "{blue}Detective",

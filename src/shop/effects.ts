@@ -1209,7 +1209,9 @@ function revealRole(slot: number): void {
   const role = reg.roleOf(slot);
   if (role === RoleId.None) return;
   // Reuse the body-identification phrasing so the reveal reads consistently.
-  const line = msg("BODY_IDENTIFIED", "Stickers", reg.nameOf(slot), roleName(role));
   const active = reg.activeSlots();
-  for (let i = 0; i < active.length; i++) tell(active[i]!, line);
+  for (let i = 0; i < active.length; i++) {
+    const to = active[i]!;
+    tell(to, msgFor(to, "BODY_IDENTIFIED", "Stickers", reg.nameOf(slot), roleName(role)));
+  }
 }

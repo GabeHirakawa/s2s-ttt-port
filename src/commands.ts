@@ -20,7 +20,7 @@ import { msg, msgFor } from "./core/msgs";
 import * as reg from "./core/registry";
 import { getHealth, teamOf, tellAll } from "./cs2/pawn";
 import { game, inWarmup, startGame, endGame } from "./game/game";
-import { roleName } from "./game/roles";
+import { roleName, roleNameFor } from "./game/roles";
 import { printLogsTo } from "./game/logger";
 import { allBodies } from "./cs2/bodies";
 import { Entity } from "@s2script/sdk/entity";
@@ -72,7 +72,14 @@ export function registerCommands(commands: CtxCommands): void {
       `[ttt] bodies=${bodies.length} (live entities: ${live}, ` +
         `identified: ${bodies.filter((b) => b.identified).length})`,
     );
-    cmd.reply(`[ttt] world entities: point_worldtext=${Entity.findByClass("point_worldtext").length} prop_ragdoll=${Entity.findByClass("prop_ragdoll").length}`);
+    cmd.reply(
+      msgFor(
+        cmd.callerSlot,
+        "CMD_WORLD_ENTITIES",
+        Entity.findByClass("point_worldtext").length,
+        Entity.findByClass("prop_ragdoll").length,
+      ),
+    );
     const d = damageDiag;
     cmd.reply(
       `[ttt] damage: preHook=${d.hits} fallback=${d.fallbackHits} ` +
@@ -208,7 +215,7 @@ export function registerCommands(commands: CtxCommands): void {
       return;
     }
     startGame();
-    cmd.reply("Round starting.");
+    cmd.reply(msgFor(cmd.callerSlot, "CMD_ROUND_STARTING"));
   });
 
   commands.registerAdmin("sm_ttt_end", ADMFLAG.GENERIC, (cmd) => {
@@ -217,13 +224,13 @@ export function registerCommands(commands: CtxCommands): void {
       return;
     }
     endGame(RoleId.None, "Ended by an admin");
-    cmd.reply("Round ended.");
+    cmd.reply(msgFor(cmd.callerSlot, "CMD_ROUND_ENDED"));
   });
 
   commands.registerAdmin("sm_ttt_special", ADMFLAG.GENERIC, (cmd) => {
     const id = cmd.arg(0).toLowerCase();
     if (id === "") {
-      cmd.reply(`Available: ${roundIds().join(", ")}`);
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_SPECIAL_AVAILABLE", roundIds().join(", ")));
       return;
     }
     const started = startSpecialRounds([id]);
@@ -248,13 +255,13 @@ export function registerCommands(commands: CtxCommands): void {
             (out > 0 ? ` (benched ${out} more round${out === 1 ? "" : "s"})` : ""),
         );
       }
-      cmd.reply("[ttt] usage: sm_ttt_karma <slot|name> <value>   (also clears a karma timeout)");
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_USAGE_KARMA"));
       return;
     }
 
     const slot = resolveTarget(cmd.arg(0));
     if (slot < 0) {
-      cmd.reply(`[ttt] no connected player matching "${cmd.arg(0)}"`);
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_NO_PLAYER_MATCH", cmd.arg(0)));
       return;
     }
     if (cmd.argCount < 2) {
@@ -281,22 +288,24 @@ export function registerCommands(commands: CtxCommands): void {
   /** `ttt_give <target> <item>` — grant a shop item for free (port of the C# `GiveItemCommand`). */
   commands.registerAdmin("sm_ttt_give", ADMFLAG.GENERIC, (cmd) => {
     if (cmd.argCount === 0) {
-      cmd.reply(`[ttt] items: ${allItems().map((i) => i.id).join(", ")}`);
-      cmd.reply("[ttt] usage: sm_ttt_give <slot|name> <item-id>");
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_ITEM_LIST", allItems().map((i) => i.id).join(", ")));
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_USAGE_GIVE"));
       return;
     }
     const slot = resolveTarget(cmd.arg(0));
     if (slot < 0) {
-      cmd.reply(`[ttt] no connected player matching "${cmd.arg(0)}"`);
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_NO_PLAYER_MATCH", cmd.arg(0)));
       return;
     }
     const item = itemById(cmd.arg(1).toLowerCase());
     if (item === undefined) {
-      cmd.reply(`[ttt] unknown item "${cmd.arg(1)}" — try ttt_give with no arguments`);
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_UNKNOWN_ITEM", cmd.arg(1)));
       return;
     }
     item.onPurchase(slot);
-    cmd.reply(`[ttt] gave ${msg(item.nameKey)} to ${reg.nameOf(slot)}`);
+    cmd.reply(
+      msgFor(cmd.callerSlot, "CMD_GAVE_ITEM", msgFor(cmd.callerSlot, item.nameKey), reg.nameOf(slot)),
+    );
   });
 
   /**
@@ -353,7 +362,7 @@ export function registerCommands(commands: CtxCommands): void {
       return;
     }
     reg.setRole(slot, role);
-    cmd.reply(`Set slot ${slot} to ${roleName(role)}.`);
+    cmd.reply(msgFor(cmd.callerSlot, "CMD_ROLE_SET", slot, roleNameFor(cmd.callerSlot, role)));
   });
 }
 
