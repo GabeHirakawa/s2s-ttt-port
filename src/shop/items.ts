@@ -54,50 +54,50 @@ function item(
 export function registerItems(): void {
   // ── universal ─────────────────────────────────────────────────────────────
   register(
-    item("armor", "SHOP_ITEM_ARMOR", "SHOP_ITEM_ARMOR_DESC", RoleId.None, "css_ttt_shop_armor_price", (slot) => {
+    item("armor", "SHOP_ITEM_ARMOR", "SHOP_ITEM_ARMOR_DESC", RoleId.None, "sm_ttt_shop_armor_price", (slot) => {
       // `ArmorItem.OnPurchase` is `SetArmor(config.Armor, config.Helmet)` and `ArmorConfig.Helmet`
       // ships `true`, so the item has always included the helmet — a bare armor value leaves the
       // buyer taking full headshot damage, which is most of what they paid for.
-      giveArmorWithHelmet(slot, n("css_ttt_shop_armor_amount"));
+      giveArmorWithHelmet(slot, n("sm_ttt_shop_armor_amount"));
     }),
   );
 
   register(
-    item("healthshot", "SHOP_ITEM_HEALTHSHOT", "SHOP_ITEM_HEALTHSHOT_DESC", RoleId.None, "css_ttt_shop_healthshot_price", (slot) => {
+    item("healthshot", "SHOP_ITEM_HEALTHSHOT", "SHOP_ITEM_HEALTHSHOT_DESC", RoleId.None, "sm_ttt_shop_healthshot_price", (slot) => {
       give(slot, "weapon_healthshot");
     }, { limit: 2, refresh: () => undefined }),
   );
 
   register(
-    item("m4a1", "SHOP_ITEM_M4A1", "SHOP_ITEM_M4A1_DESC", RoleId.None, "css_ttt_shop_m4a1_price", (slot) => {
-      for (const raw of list("css_ttt_shop_m4a1_clear_slots")) {
+    item("m4a1", "SHOP_ITEM_M4A1", "SHOP_ITEM_M4A1_DESC", RoleId.None, "sm_ttt_shop_m4a1_price", (slot) => {
+      for (const raw of list("sm_ttt_shop_m4a1_clear_slots")) {
         const idx = parseInt(raw, 10);
         if (Number.isFinite(idx)) clearSlot(slot, idx as GearSlot);
       }
-      for (const weapon of list("css_ttt_shop_m4a1_weapons")) give(slot, weapon);
+      for (const weapon of list("sm_ttt_shop_m4a1_weapons")) give(slot, weapon);
     }),
   );
 
   register(
-    item("taser", "SHOP_ITEM_TASER", "SHOP_ITEM_TASER_DESC", RoleId.None, "css_ttt_shop_taser_price", (slot) => {
+    item("taser", "SHOP_ITEM_TASER", "SHOP_ITEM_TASER_DESC", RoleId.None, "sm_ttt_shop_taser_price", (slot) => {
       // `grantTaser` is the whole of `TaserItem.OnPurchase`: remove-then-give of the CONFIGURED
       // weapon, so re-buying refreshes a spent taser. A hard-coded `give("weapon_taser")` here both
-      // duplicated that grant and ignored `css_ttt_shop_taser_weapon`.
+      // duplicated that grant and ignored `sm_ttt_shop_taser_weapon`.
       fx.grantTaser(slot);
     }),
   );
 
   // ── detective ─────────────────────────────────────────────────────────────
   register(
-    item("deagle", "SHOP_ITEM_DEAGLE", "SHOP_ITEM_DEAGLE_DESC", RoleId.Detective, "css_ttt_shop_onedeagle_price", (slot) => {
+    item("deagle", "SHOP_ITEM_DEAGLE", "SHOP_ITEM_DEAGLE_DESC", RoleId.Detective, "sm_ttt_shop_onedeagle_price", (slot) => {
       clearSlot(slot, GearSlot.Pistol);
-      give(slot, str("css_ttt_shop_onedeagle_weapon"), 1, 0);
+      give(slot, str("sm_ttt_shop_onedeagle_weapon"), 1, 0);
       fx.grantOneShotRevolver(slot);
     }, { limit: 1 }),
   );
 
   register(
-    item("stickers", "SHOP_ITEM_STICKERS", "SHOP_ITEM_STICKERS_DESC", RoleId.Detective, "css_ttt_shop_stickers_price", (slot) => {
+    item("stickers", "SHOP_ITEM_STICKERS", "SHOP_ITEM_STICKERS_DESC", RoleId.Detective, "sm_ttt_shop_stickers_price", (slot) => {
       fx.grantStickers(slot);
       // The item's actual payoff is the PERSISTENT reveal: the C# `StickerListener` calls
       // `IIconManager.RevealToAll`, which makes the tased player's role icon transmit to every
@@ -108,114 +108,114 @@ export function registerItems(): void {
   );
 
   register(
-    item("dna", "SHOP_ITEM_DNA", "SHOP_ITEM_DNA_DESC", RoleId.Detective, "css_ttt_shop_dna_price", (slot) => {
+    item("dna", "SHOP_ITEM_DNA", "SHOP_ITEM_DNA_DESC", RoleId.Detective, "sm_ttt_shop_dna_price", (slot) => {
       fx.grantDnaScanner(slot);
     }, { limit: 1 }),
   );
 
   register(
-    item("healthstation", "SHOP_ITEM_STATION_HEALTH", "SHOP_ITEM_STATION_HEALTH_DESC", RoleId.Detective, "css_ttt_shop_healthstation_price", (slot) => {
-      fx.placeStation(slot, n("css_ttt_shop_healthstation_increments"));
+    item("healthstation", "SHOP_ITEM_STATION_HEALTH", "SHOP_ITEM_STATION_HEALTH_DESC", RoleId.Detective, "sm_ttt_shop_healthstation_price", (slot) => {
+      fx.placeStation(slot, n("sm_ttt_shop_healthstation_increments"));
     }),
   );
 
   register(
-    item("compass_body", "SHOP_ITEM_COMPASS_BODY", "SHOP_ITEM_COMPASS_BODY_DESC", RoleId.Detective, "css_ttt_shop_compass_price", (slot) => {
+    item("compass_body", "SHOP_ITEM_COMPASS_BODY", "SHOP_ITEM_COMPASS_BODY_DESC", RoleId.Detective, "sm_ttt_shop_compass_price", (slot) => {
       fx.grantCompass(slot, fx.CompassMode.Bodies);
     }, { limit: 1 }),
   );
 
   // ── traitor ───────────────────────────────────────────────────────────────
   register(
-    item("c4", "SHOP_ITEM_C4", "SHOP_ITEM_C4_DESC", RoleId.Traitor, "css_ttt_shop_c4_price", (slot) => {
+    item("c4", "SHOP_ITEM_C4", "SHOP_ITEM_C4_DESC", RoleId.Traitor, "sm_ttt_shop_c4_price", (slot) => {
       give(slot, "weapon_c4");
       fx.grantC4();
       wfx.applyC4Fuse();
     }, {
       limit: 0,
       canPurchase: (slot) =>
-        fx.c4Count() >= n("css_ttt_shop_c4_max_at_once") && n("css_ttt_shop_c4_max_at_once") > 0
+        fx.c4Count() >= n("sm_ttt_shop_c4_max_at_once") && n("sm_ttt_shop_c4_max_at_once") > 0
           ? PurchaseResult.NotPurchasable
           : PurchaseResult.Success,
     }),
   );
 
   register(
-    item("gloves", "SHOP_ITEM_GLOVES", "SHOP_ITEM_GLOVES_DESC", RoleId.Traitor, "css_ttt_shop_gloves_price", (slot) => {
-      fx.grantGloves(slot, n("css_ttt_shop_gloves_max_uses"));
+    item("gloves", "SHOP_ITEM_GLOVES", "SHOP_ITEM_GLOVES_DESC", RoleId.Traitor, "sm_ttt_shop_gloves_price", (slot) => {
+      fx.grantGloves(slot, n("sm_ttt_shop_gloves_max_uses"));
     }, { limit: 1 }),
   );
 
   register(
-    item("camo", "SHOP_ITEM_CAMO", "SHOP_ITEM_CAMO_DESC", RoleId.Traitor, "css_ttt_shop_camo_price", (slot) => {
+    item("camo", "SHOP_ITEM_CAMO", "SHOP_ITEM_CAMO_DESC", RoleId.Traitor, "sm_ttt_shop_camo_price", (slot) => {
       fx.grantCamo(slot);
     }, { limit: 1 }),
   );
 
   register(
-    item("bodypaint", "SHOP_ITEM_BODY_PAINT", "SHOP_ITEM_BODY_PAINT_DESC", RoleId.Traitor, "css_ttt_shop_bodypaint_price", (slot) => {
-      fx.grantBodyPaint(slot, n("css_ttt_shop_bodypaint_max_uses"));
+    item("bodypaint", "SHOP_ITEM_BODY_PAINT", "SHOP_ITEM_BODY_PAINT_DESC", RoleId.Traitor, "sm_ttt_shop_bodypaint_price", (slot) => {
+      fx.grantBodyPaint(slot, n("sm_ttt_shop_bodypaint_max_uses"));
     }, { limit: 1 }),
   );
 
   register(
-    item("onehitknife", "SHOP_ITEM_ONE_HIT_KNIFE", "SHOP_ITEM_ONE_HIT_KNIFE_DESC", RoleId.Traitor, "css_ttt_shop_onehitknife_price", (slot) => {
+    item("onehitknife", "SHOP_ITEM_ONE_HIT_KNIFE", "SHOP_ITEM_ONE_HIT_KNIFE_DESC", RoleId.Traitor, "sm_ttt_shop_onehitknife_price", (slot) => {
       fx.grantOneHitKnife(slot);
     }, { limit: 1 }),
   );
 
   register(
-    item("silentawp", "SHOP_ITEM_SILENT_AWP", "SHOP_ITEM_SILENT_AWP_DESC", RoleId.Traitor, "css_ttt_shop_silentawp_price", (slot) => {
+    item("silentawp", "SHOP_ITEM_SILENT_AWP", "SHOP_ITEM_SILENT_AWP_DESC", RoleId.Traitor, "sm_ttt_shop_silentawp_price", (slot) => {
       give(
         slot,
         "weapon_awp",
-        n("css_ttt_shop_silentawp_current_ammo"),
-        n("css_ttt_shop_silentawp_reserve_ammo"),
+        n("sm_ttt_shop_silentawp_current_ammo"),
+        n("sm_ttt_shop_silentawp_reserve_ammo"),
       );
       wfx.grantSilentShots(
         slot,
-        n("css_ttt_shop_silentawp_current_ammo") + n("css_ttt_shop_silentawp_reserve_ammo"),
+        n("sm_ttt_shop_silentawp_current_ammo") + n("sm_ttt_shop_silentawp_reserve_ammo"),
       );
     }, { limit: 1 }),
   );
 
   register(
-    item("poisonsmoke", "SHOP_ITEM_POISON_SMOKE", "SHOP_ITEM_POISON_SMOKE_DESC", RoleId.Traitor, "css_ttt_shop_poisonsmoke_price", (slot) => {
+    item("poisonsmoke", "SHOP_ITEM_POISON_SMOKE", "SHOP_ITEM_POISON_SMOKE_DESC", RoleId.Traitor, "sm_ttt_shop_poisonsmoke_price", (slot) => {
       give(slot, "weapon_smokegrenade");
       wfx.armPoisonSmoke(slot);
     }, { limit: 1 }),
   );
 
   register(
-    item("poisonshots", "SHOP_ITEM_POISON_SHOTS", "SHOP_ITEM_POISON_SHOTS_DESC", RoleId.Traitor, "css_ttt_shop_poisonshots_price", (slot) => {
+    item("poisonshots", "SHOP_ITEM_POISON_SHOTS", "SHOP_ITEM_POISON_SHOTS_DESC", RoleId.Traitor, "sm_ttt_shop_poisonshots_price", (slot) => {
       // The counter lives in `weaponfx.ts`, not `effects.ts`: a charge is spent on FIRE (and the
       // same counter silences the pistol through the shared fire-sound hook), while `effects.ts`
       // only READS it to decide whether a landed pistol hit poisons.
-      wfx.grantPoisonShots(slot, n("css_ttt_shop_poisonshots_total"));
+      wfx.grantPoisonShots(slot, n("sm_ttt_shop_poisonshots_total"));
     }, { limit: 1 }),
   );
 
   register(
-    item("clustergrenade", "SHOP_ITEM_CLUSTER_GRENADE", "SHOP_ITEM_CLUSTER_GRENADE_DESC", RoleId.Traitor, "css_ttt_shop_clustergrenade_price", (slot) => {
+    item("clustergrenade", "SHOP_ITEM_CLUSTER_GRENADE", "SHOP_ITEM_CLUSTER_GRENADE_DESC", RoleId.Traitor, "sm_ttt_shop_clustergrenade_price", (slot) => {
       give(slot, "weapon_hegrenade");
       wfx.armCluster(slot);
     }, { limit: 1 }),
   );
 
   register(
-    item("damagestation", "SHOP_ITEM_STATION_HURT", "SHOP_ITEM_STATION_HURT_DESC", RoleId.Traitor, "css_ttt_shop_damagestation_price", (slot) => {
-      fx.placeStation(slot, n("css_ttt_shop_damagestation_increments"));
+    item("damagestation", "SHOP_ITEM_STATION_HURT", "SHOP_ITEM_STATION_HURT_DESC", RoleId.Traitor, "sm_ttt_shop_damagestation_price", (slot) => {
+      fx.placeStation(slot, n("sm_ttt_shop_damagestation_increments"));
     }, { limit: 3 }),
   );
 
   register(
-    item("compass_player", "SHOP_ITEM_COMPASS_PLAYER", "SHOP_ITEM_COMPASS_PLAYER_DESC", RoleId.Traitor, "css_ttt_shop_compass_price", (slot) => {
+    item("compass_player", "SHOP_ITEM_COMPASS_PLAYER", "SHOP_ITEM_COMPASS_PLAYER_DESC", RoleId.Traitor, "sm_ttt_shop_compass_price", (slot) => {
       fx.grantCompass(slot, fx.CompassMode.Players);
     }, { limit: 1 }),
   );
 
   register(
-    item("tripwire", "SHOP_ITEM_TRIPWIRE", "SHOP_ITEM_TRIPWIRE_DESC", RoleId.Traitor, "css_ttt_shop_tripwire_price", (slot) => {
+    item("tripwire", "SHOP_ITEM_TRIPWIRE", "SHOP_ITEM_TRIPWIRE_DESC", RoleId.Traitor, "sm_ttt_shop_tripwire_price", (slot) => {
       if (!fx.placeTripwire(slot)) tell(slot, msgFor(slot, "SHOP_ITEM_TRIPWIRE_TOOFAR"));
     }),
   );

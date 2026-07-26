@@ -183,7 +183,7 @@ export function grantTaser(slot: number): void {
   hasTaser[slot] = 1;
   const pawn = pawnOf(slot);
   if (pawn === null || !pawn.isValid) return;
-  const cls = resolveWeapon(s("css_ttt_shop_taser_weapon"));
+  const cls = resolveWeapon(s("sm_ttt_shop_taser_weapon"));
   const held = pawn.weapons as HeldWeapon[];
   for (let i = 0; i < held.length; i++) {
     const w = held[i]!;
@@ -231,7 +231,7 @@ export function spendGlove(slot: number, forBody: boolean): boolean {
   const left = gloveUses[slot]!;
   if (left <= 0) return false;
   gloveUses[slot] = left - 1;
-  const max = n("css_ttt_shop_gloves_max_uses");
+  const max = n("sm_ttt_shop_gloves_max_uses");
   tell(
     slot,
     forBody
@@ -286,7 +286,7 @@ let paintRaw = "";
 const paintColor: Rgb = { r: 0xad, g: 0xff, b: 0x2f };
 
 /**
- * Resolve `css_ttt_shop_bodypaint_color`, mirroring `CS2BodyPaintConfig.Load`: HTML hex first, then
+ * Resolve `sm_ttt_shop_bodypaint_color`, mirroring `CS2BodyPaintConfig.Load`: HTML hex first, then
  * a known colour name, then GreenYellow. Memoised on the raw string so repeat paints re-parse
  * nothing; paint is spent on a USE press, well outside the shared frame handler.
  *
@@ -295,7 +295,7 @@ const paintColor: Rgb = { r: 0xad, g: 0xff, b: 0x2f };
  * silently making the item useless.
  */
 function resolvePaintColor(): Rgb {
-  const raw = s("css_ttt_shop_bodypaint_color");
+  const raw = s("sm_ttt_shop_bodypaint_color");
   if (raw === paintRaw) return paintColor;
   paintRaw = raw;
 
@@ -315,10 +315,10 @@ function resolvePaintColor(): Rgb {
  * Apply camouflage: drop the pawn's opacity to the configured visibility.
  *
  * `m_clrRender` is not in the s2script schema, so this goes through the pawn's `Alpha` entity input
- * (see `cs2/color.ts`). `css_ttt_shop_camo_visibility` is a 0..1 multiplier, matching the C# config.
+ * (see `cs2/color.ts`). `sm_ttt_shop_camo_visibility` is a 0..1 multiplier, matching the C# config.
  */
 function applyCamo(slot: number): void {
-  const visibility = n("css_ttt_shop_camo_visibility");
+  const visibility = n("sm_ttt_shop_camo_visibility");
   setPawnAlpha(slot, Math.round(Math.max(0, Math.min(1, visibility)) * 255));
 }
 
@@ -353,7 +353,7 @@ export function placeStation(slot: number, increment: number, budget?: number): 
   // whole round if the hook is ever missing, which is the worse failure by far. The two models
   // score a bullet slightly differently, so whichever gets there first wins by about one shot —
   // and a prop the engine broke is reaped by `tickStations`' `isValid()` check.
-  const maxHealth = n("css_ttt_shop_healthstation_station_health");
+  const maxHealth = n("sm_ttt_shop_healthstation_station_health");
   const ent = createEntity("prop_physics_override", {
     model: STATION_MODEL,
     targetname: `ttt_station_${slot}`,
@@ -370,10 +370,10 @@ export function placeStation(slot: number, increment: number, budget?: number): 
     increment,
     // C# exposes no ConVar for the hurt station's allowance — `DamageStationConfig` hard-codes
     // -3000 — so a caller that does not pass one gets the budget implied by the sign of the
-    // increment, with `css_ttt_shop_damagestation_total_damage` able to override it if registered.
+    // increment, with `sm_ttt_shop_damagestation_total_damage` able to override it if registered.
     budget: budget ?? (increment < 0
-      ? n("css_ttt_shop_damagestation_total_damage") || 3000
-      : Math.abs(n("css_ttt_shop_healthstation_total_health_given"))),
+      ? n("sm_ttt_shop_damagestation_total_damage") || 3000
+      : Math.abs(n("sm_ttt_shop_healthstation_total_health_given"))),
     given: 0,
     health: maxHealth,
     maxHealth,
@@ -388,8 +388,8 @@ export function placeStation(slot: number, increment: number, budget?: number): 
 /** Apply station effects. `dt` is elapsed seconds. */
 function tickStations(dt: number): void {
   if (stations.length === 0) return;
-  const interval = Math.max(0.1, n("css_ttt_shop_healthstation_interval"));
-  const range = n("css_ttt_shop_healthstation_max_range");
+  const interval = Math.max(0.1, n("sm_ttt_shop_healthstation_interval"));
+  const range = n("sm_ttt_shop_healthstation_max_range");
   const rangeSq = range * range;
 
   for (let i = stations.length - 1; i >= 0; i--) {
@@ -481,7 +481,7 @@ export function onBulletImpact(shooter: number, x: number, y: number, z: number)
 
 /** Detonate the nearest tripwire if the bullet landed on its anchor. */
 function shootTripwire(x: number, y: number, z: number): void {
-  const sizeSq = n("css_ttt_shop_tripwire_size_squared");
+  const sizeSq = n("sm_ttt_shop_tripwire_size_squared");
   let best = -1;
   let bestSq = Number.POSITIVE_INFINITY;
   for (let i = 0; i < tripwires.length; i++) {
@@ -604,7 +604,7 @@ export function placeTripwire(slot: number): boolean {
   const dx = first.endPos.x - o.x;
   const dy = first.endPos.y - o.y;
   const dz = first.endPos.z - o.z;
-  if (dx * dx + dy * dy + dz * dz > n("css_ttt_shop_tripwire_max_distance_squared")) return false;
+  if (dx * dx + dy * dy + dz * dz > n("sm_ttt_shop_tripwire_max_distance_squared")) return false;
 
   // Continue past the first surface to find the wall opposite, giving the wire its span.
   const dirLen = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
@@ -621,12 +621,12 @@ export function placeTripwire(slot: number): boolean {
   const end = far.didHit ? far.endPos : new Vector(start.x, start.y, start.z + 64);
 
   const color: [number, number, number, number] = [
-    n("css_ttt_shop_tripwire_color_r"),
-    n("css_ttt_shop_tripwire_color_g"),
-    n("css_ttt_shop_tripwire_color_b"),
-    n("css_ttt_shop_tripwire_color_a"),
+    n("sm_ttt_shop_tripwire_color_r"),
+    n("sm_ttt_shop_tripwire_color_g"),
+    n("sm_ttt_shop_tripwire_color_b"),
+    n("sm_ttt_shop_tripwire_color_a"),
   ];
-  const beam = Beam.draw(start, end, { color, width: n("css_ttt_shop_tripwire_thickness") });
+  const beam = Beam.draw(start, end, { color, width: n("sm_ttt_shop_tripwire_thickness") });
   // The C# emitted the wire's whole audible life from its `prop_dynamic`; this port has no prop, so
   // the beam entity is the sound source. Only positional emits — an entity-less `Sound.emit` is a
   // global 2D broadcast, which would tell the whole server a wire just went down.
@@ -638,7 +638,7 @@ export function placeTripwire(slot: number): boolean {
     beam,
     ax: start.x, ay: start.y, az: start.z,
     bx: end.x, by: end.y, bz: end.z,
-    arming: n("css_ttt_shop_tripwire_initiation_time"),
+    arming: n("sm_ttt_shop_tripwire_initiation_time"),
     defuseProgress: 0,
     defuser: -1,
     defuseSound: 0,
@@ -667,8 +667,8 @@ function distToSegmentSq(
 /** Advance tripwire arming, crossing detection and defusing. */
 function tickTripwires(dt: number): void {
   if (tripwires.length === 0) return;
-  const sizeSq = n("css_ttt_shop_tripwire_size_squared");
-  const ffTriggers = b("css_ttt_shop_tripwire_friendlyfire_triggers");
+  const sizeSq = n("sm_ttt_shop_tripwire_size_squared");
+  const ffTriggers = b("sm_ttt_shop_tripwire_friendlyfire_triggers");
 
   for (let i = tripwires.length - 1; i >= 0; i--) {
     const tw = tripwires[i]!;
@@ -712,11 +712,11 @@ function tickTripwires(dt: number): void {
 
 /** Blow a tripwire, damaging everyone within its falloff radius. */
 function detonateTripwire(tw: Tripwire): void {
-  const power = n("css_ttt_shop_tripwire_explosion_power");
-  const falloff = n("css_ttt_shop_tripwire_falloff_delay");
-  const ffMult = n("css_ttt_shop_tripwire_friendlyfire_multiplier");
+  const power = n("sm_ttt_shop_tripwire_explosion_power");
+  const falloff = n("sm_ttt_shop_tripwire_falloff_delay");
+  const ffMult = n("sm_ttt_shop_tripwire_friendlyfire_multiplier");
   const owner = tw.owner;
-  const forgiveAfter = n("css_ttt_shop_tripwire_friendlyfire_karma_penalty_time");
+  const forgiveAfter = n("sm_ttt_shop_tripwire_friendlyfire_karma_penalty_time");
   const age = Server.gameTime - tw.placedAt;
   if (tw.beam !== null) Sound.emit(SND_TRIPWIRE_BLAST, { entity: tw.beam.ref });
 
@@ -798,17 +798,17 @@ export function tryDefuseTripwire(slot: number, dt: number): boolean {
 
     tw.defuser = slot;
     tw.defuseProgress += dt;
-    const total = n("css_ttt_shop_tripwire_defuse_time");
+    const total = n("sm_ttt_shop_tripwire_defuse_time");
     if (tw.defuseProgress >= total) {
       tw.alive = false;
       if (tw.beam !== null) Sound.emit(SND_DEFUSE_DONE, { entity: tw.beam.ref, volume: 0.2 });
-      addBalance(slot, n("css_ttt_shop_tripwire_defuse_reward"), "Defused Tripwire");
+      addBalance(slot, n("sm_ttt_shop_tripwire_defuse_reward"), "Defused Tripwire");
       return true;
     }
     // The C# defuse ran on its own `DefuseRate` timer and beeped once per tick; this runs off the
     // USE handler every frame, so the beep is paced back to that rate by hand.
     tw.defuseSound += dt;
-    if (tw.defuseSound >= Math.max(0.05, n("css_ttt_shop_tripwire_defuse_rate"))) {
+    if (tw.defuseSound >= Math.max(0.05, n("sm_ttt_shop_tripwire_defuse_rate"))) {
       tw.defuseSound = 0;
       oneSlot[0] = slot;
       pawn.emitSound(SND_DEFUSE_TICK, { recipients: oneSlot });
@@ -831,7 +831,7 @@ export function tryDefuseTripwire(slot: number, dt: number): boolean {
  * hands the killer to `markGadgetKill` on the lethal tick so the kill still lands on the poisoner.
  */
 export function applyPoison(victim: number, attacker = -1, fromSmoke = false): void {
-  poisonRemaining[victim] = n("css_ttt_shop_poisonsmoke_poison_total_damage");
+  poisonRemaining[victim] = n("sm_ttt_shop_poisonsmoke_poison_total_damage");
   poisonTimer[victim] = 0;
   poisonSource[victim] = attacker;
   poisonFromSmoke[victim] = fromSmoke ? 1 : 0;
@@ -857,8 +857,8 @@ const POISON_FADE_COLOR = (128 | (128 << 16) | (128 << 24)) >>> 0;
 
 /** Tick poison damage. */
 function tickPoison(dt: number): void {
-  const interval = Math.max(0.05, n("css_ttt_shop_poisonsmoke_poison_tick_interval") / 1000);
-  const perTick = n("css_ttt_shop_poisonsmoke_poison_damage_per_tick");
+  const interval = Math.max(0.05, n("sm_ttt_shop_poisonsmoke_poison_tick_interval") / 1000);
+  const perTick = n("sm_ttt_shop_poisonsmoke_poison_damage_per_tick");
 
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
@@ -933,9 +933,9 @@ function tickCompass(dt: number): void {
   if (compassAccum < 0.25) return;
   compassAccum = 0;
 
-  const length = n("css_ttt_shop_compass_length");
-  const fov = Math.max(0.001, Math.min(360, n("css_ttt_shop_compass_fov")));
-  const range = n("css_ttt_shop_compass_max_range");
+  const length = n("sm_ttt_shop_compass_length");
+  const fov = Math.max(0.001, Math.min(360, n("sm_ttt_shop_compass_fov")));
+  const range = n("sm_ttt_shop_compass_max_range");
   const rangeSq = range * range;
   if (compassBuf.length !== length) compassBuf = new Array<string>(length);
 
@@ -1132,11 +1132,11 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
       // path is `player_hurt`, whose weapon string comes straight from the engine field.
       if (hasRevolver[attacker] === 1 && isOneShotWeapon(ev.weapon)) {
         const sameTeam = (reg.roleOf(attacker) === RoleId.Traitor) === (reg.roleOf(victim) === RoleId.Traitor);
-        if (sameTeam && !b("css_ttt_shop_onedeagle_ff")) {
+        if (sameTeam && !b("sm_ttt_shop_onedeagle_ff")) {
           hasRevolver[attacker] = 0;
           ev.canceled = true;
           tell(attacker, msgFor(attacker, "SHOP_ITEM_DEAGLE_HIT_FF"));
-          if (b("css_ttt_shop_onedeagle_kill_shooter_on_ff")) setHealth(attacker, 0);
+          if (b("sm_ttt_shop_onedeagle_kill_shooter_on_ff")) setHealth(attacker, 0);
           return;
         }
         hasRevolver[attacker] = 0; // one shot only, matching the C# RemoveItem on first hit
@@ -1148,7 +1148,7 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
       // One-Hit Knife: consumed on the next knife strike.
       if (hasOneHitKnife[attacker] === 1 && KNIVES.has(ev.weapon)) {
         const sameTeam = (reg.roleOf(attacker) === RoleId.Traitor) === (reg.roleOf(victim) === RoleId.Traitor);
-        if (sameTeam && !b("css_ttt_shop_onehitknife_friendly_fire")) return;
+        if (sameTeam && !b("sm_ttt_shop_onehitknife_friendly_fire")) return;
         hasOneHitKnife[attacker] = 0;
         ev.damage = 1000;
         return;
@@ -1186,7 +1186,7 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
  * actually reports for it.
  */
 function isOneShotWeapon(weapon: string): boolean {
-  const cls = s("css_ttt_shop_onedeagle_weapon");
+  const cls = s("sm_ttt_shop_onedeagle_weapon");
   if (weapon === cls) return true;
   return cls === "weapon_revolver" && weapon === "weapon_deagle";
 }

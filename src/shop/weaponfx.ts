@@ -93,7 +93,7 @@ export function armCluster(slot: number): void {
 }
 /** Apply the configured C4 fuse length. */
 export function applyC4Fuse(): void {
-  Server.setCvar("mp_c4timer", String(n("css_ttt_shop_c4_fuse_time")));
+  Server.setCvar("mp_c4timer", String(n("sm_ttt_shop_c4_fuse_time")));
 }
 
 /** True while the Suppressed special round wants pistol fire silenced. */
@@ -139,7 +139,7 @@ export function installFireHook(): void {
       if (silentShots[shooter]! <= 0) return;
 
       // Only silence the Silent AWP's own weapon.
-      const awpDef = n("css_ttt_shop_silentawp_index");
+      const awpDef = n("sm_ttt_shop_silentawp_index");
       if (def !== null && def !== awpDef) return;
 
       silentShots[shooter] = silentShots[shooter]! - 1;
@@ -327,7 +327,7 @@ export function readDna(slot: number, body: Body): void {
   lastDnaRead.set(key, now);
 
   const roleColour = rolePrefix(body.ownerRole);
-  if (now - body.timeOfDeath > n("css_ttt_shop_dna_decay_time")) {
+  if (now - body.timeOfDeath > n("sm_ttt_shop_dna_decay_time")) {
     tell(slot, msgFor(slot, "SHOP_ITEM_DNA_EXPIRED", roleColour, body.ownerName));
     return;
   }
@@ -368,14 +368,14 @@ export function onSmokeDetonate(
   if (thrower < 0 || poisonSmoke[thrower] !== 1 || !inProgress()) return;
   poisonSmoke[thrower] = 0;
 
-  const radius = n("css_ttt_shop_poisonsmoke_radius");
+  const radius = n("sm_ttt_shop_poisonsmoke_radius");
   clouds.push({
     owner: thrower,
     x,
     y,
     z,
     radiusSq: radius * radius,
-    budget: n("css_ttt_shop_poisonsmoke_poison_total_damage"),
+    budget: n("sm_ttt_shop_poisonsmoke_poison_total_damage"),
     timer: 0,
     life: SMOKE_LIFETIME,
     entity: entityId,
@@ -405,9 +405,9 @@ export function onHeDetonate(thrower: number, x: number, y: number, z: number): 
   if (thrower < 0 || clusterCharge[thrower] !== 1 || !inProgress()) return;
   clusterCharge[thrower] = 0;
 
-  const count = n("css_ttt_shop_clustergrenade_count");
-  const throwForce = n("css_ttt_shop_clustergrenade_throw_force");
-  const upForce = n("css_ttt_shop_clustergrenade_up_force");
+  const count = n("sm_ttt_shop_clustergrenade_count");
+  const throwForce = n("sm_ttt_shop_clustergrenade_throw_force");
+  const upForce = n("sm_ttt_shop_clustergrenade_up_force");
 
   // Ballistic settle distance. A fragment leaves at (cos·throw, sin·throw, up) and gravity returns
   // it to the blast plane after 2·up/g seconds, so that is how far out it is when it first lands —
@@ -477,9 +477,9 @@ export function tickWeaponFx(dt: number): void {
 
 /** Advance every live poison cloud. */
 function tickClouds(dt: number): void {
-  const interval = Math.max(0.05, n("css_ttt_shop_poisonsmoke_poison_tick_interval") / 1000);
-  const perTick = n("css_ttt_shop_poisonsmoke_poison_damage_per_tick");
-  const sound = s("css_ttt_shop_poisonsmoke_poison_sound");
+  const interval = Math.max(0.05, n("sm_ttt_shop_poisonsmoke_poison_tick_interval") / 1000);
+  const perTick = n("sm_ttt_shop_poisonsmoke_poison_damage_per_tick");
+  const sound = s("sm_ttt_shop_poisonsmoke_poison_sound");
 
   for (let i = clouds.length - 1; i >= 0; i--) {
     const cl = clouds[i]!;

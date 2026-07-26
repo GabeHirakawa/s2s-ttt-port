@@ -17,10 +17,13 @@ every Traitor.
 !karma        your karma         @<message>       Traitor-only chat
 ```
 
-`ttt status` prints the round state, per-player role/liveness/credits/karma and the warmup flag. It
+`sm_ttt status` prints the round state, per-player role/liveness/credits/karma and the warmup flag. It
 is the only view into the mode from an rcon console, since everything else TTT says goes to chat.
 
-Admin (`ADMFLAG_GENERIC`): `ttt_start`, `ttt_end`, `ttt_special [id]`, `ttt_setrole <slot> <role>`.
+Admin (`ADMFLAG_GENERIC`): `sm_ttt_start`, `sm_ttt_end`, `sm_ttt_special [id]`, `sm_ttt_setrole <slot> <role>`.
+
+Commands register under the `sm_` prefix, matching the base plugins; chat triggers are unchanged
+because dispatch tries `name` then `sm_<name>`, so `!ttt` and `!buy` still work.
 
 ## Layout
 
@@ -35,8 +38,10 @@ Admin (`ADMFLAG_GENERIC`): `ttt_start`, `ttt_end`, `ttt_special [id]`, `ttt_setr
 
 ## Configuration
 
-Every `css_ttt_*` ConVar from the C# build is registered here under the same name with the same
-default and range, so an existing `ttt.cfg` carries over unchanged. `s2s config gen` will emit the
+Every ConVar from the C# build is registered here with the same default and range, but under an
+`sm_ttt_*` name rather than the C#'s `css_ttt_*` — s2script follows the SourceMod convention, and
+`css_` referred to CounterStrikeSharp, which is not what this runs on. An existing `ttt.cfg` needs
+`css_ttt_` replaced with `sm_ttt_`; nothing else about it changes. `s2s config gen` will emit the
 full list; `src/core/cvars.ts` is the source of truth.
 
 Message text can be overridden with a flat JSON file in the configs directory, named via the

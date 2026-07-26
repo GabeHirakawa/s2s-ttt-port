@@ -437,7 +437,7 @@ export function onMapChange(): void {
   game.state = GameState.Waiting;
   // Zero the counter AFTER the round is folded up, not before: `endGame` increments it, and the
   // round it is counting was played on the map being left. Resetting first handed the new map that
-  // abandoned round, so `css_ttt_special_min_rounds_after_map` (read as `roundsThisMap < n`) came
+  // abandoned round, so `sm_ttt_special_min_rounds_after_map` (read as `roundsThisMap < n`) came
   // due one full round early after every map change.
   game.roundsThisMap = 0;
   // Bump LAST, not first. `endGame` arms its own timers (the round-end terminate and the FINISHED

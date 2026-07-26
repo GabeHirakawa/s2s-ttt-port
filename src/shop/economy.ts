@@ -35,22 +35,22 @@ const travelled = new Float64Array(MAX_SLOTS);
 
 /** Credits for a kill, by attacker/victim role — the C# `ShopConfig.CreditsForKill` table. */
 function creditsForKill(attackerRole: RoleId, victimRole: RoleId): number {
-  if (attackerRole === RoleId.None || victimRole === RoleId.None) return n("css_ttt_shop_any_kill");
+  if (attackerRole === RoleId.None || victimRole === RoleId.None) return n("sm_ttt_shop_any_kill");
   switch (attackerRole) {
     case RoleId.Traitor:
-      return victimRole === RoleId.Traitor ? n("css_ttt_shop_traitor_v_traitor")
-        : victimRole === RoleId.Detective ? n("css_ttt_shop_traitor_v_detective")
-        : n("css_ttt_shop_traitor_v_inno");
+      return victimRole === RoleId.Traitor ? n("sm_ttt_shop_traitor_v_traitor")
+        : victimRole === RoleId.Detective ? n("sm_ttt_shop_traitor_v_detective")
+        : n("sm_ttt_shop_traitor_v_inno");
     case RoleId.Detective:
-      return victimRole === RoleId.Detective ? n("css_ttt_shop_detective_v_detective")
-        : victimRole === RoleId.Traitor ? n("css_ttt_shop_detective_v_traitor")
-        : n("css_ttt_shop_detective_v_inno");
+      return victimRole === RoleId.Detective ? n("sm_ttt_shop_detective_v_detective")
+        : victimRole === RoleId.Traitor ? n("sm_ttt_shop_detective_v_traitor")
+        : n("sm_ttt_shop_detective_v_inno");
     case RoleId.Innocent:
-      return victimRole === RoleId.Detective ? n("css_ttt_shop_inno_v_detective")
-        : victimRole === RoleId.Traitor ? n("css_ttt_shop_inno_v_traitor")
-        : n("css_ttt_shop_inno_v_inno");
+      return victimRole === RoleId.Detective ? n("sm_ttt_shop_inno_v_detective")
+        : victimRole === RoleId.Traitor ? n("sm_ttt_shop_inno_v_traitor")
+        : n("sm_ttt_shop_inno_v_inno");
     default:
-      return n("css_ttt_shop_any_kill");
+      return n("sm_ttt_shop_any_kill");
   }
 }
 
@@ -117,8 +117,8 @@ function payExplorationRewards(): void {
 
   ranking.sort((a, b) => travelled[b]! - travelled[a]!);
 
-  const min = n("css_ttt_shop_reward_min");
-  const max = n("css_ttt_shop_reward_max");
+  const min = n("sm_ttt_shop_reward_min");
+  const max = n("sm_ttt_shop_reward_max");
   const count = ranking.length;
   const reason = msg("SHOP_EXPLORATION");
   for (let i = 0; i < count; i++) {
@@ -152,7 +152,7 @@ export function tickEconomy(dt: number): void {
   }
 
   rewardAccum += dt;
-  const interval = n("css_ttt_shop_reward_interval");
+  const interval = n("sm_ttt_shop_reward_interval");
   if (rewardAccum >= interval) {
     rewardAccum = 0;
     payExplorationRewards();
@@ -181,11 +181,11 @@ export function installEconomy(bus: EventBus<TttEvents>): void {
     const assister = ev.assister;
     if (assister >= 0 && assister !== killer) {
       const assistCredits = Math.trunc(
-        creditsForKill(reg.roleOf(assister), victimRole) * n("css_ttt_shop_assist_multiplier"),
+        creditsForKill(reg.roleOf(assister), victimRole) * n("sm_ttt_shop_assist_multiplier"),
       );
       addBalance(assister, assistCredits, `Assisted on ${reg.nameOf(ev.slot)}`);
     } else {
-      killerCredits = Math.trunc(killerCredits * n("css_ttt_shop_solo_kill_multiplier"));
+      killerCredits = Math.trunc(killerCredits * n("sm_ttt_shop_solo_kill_multiplier"));
     }
     addBalance(killer, killerCredits, `Killed ${reg.nameOf(ev.slot)}`);
 

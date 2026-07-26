@@ -83,7 +83,7 @@ let bus: EventBus<TttEvents>;
 export const MAX_KARMA = 100;
 
 /**
- * The shipped default of `css_ttt_karma_low_command` (src/core/cvars.ts), verbatim.
+ * The shipped default of `sm_ttt_karma_low_command` (src/core/cvars.ts), verbatim.
  *
  * It names `sm_ban`, which a bare s2script server does not implement (the C# shipped the
  * CounterStrikeSharp spelling `css_ban` for the same reason: on *their* runtime it existed). Leaving
@@ -315,34 +315,34 @@ function scoreKill(victim: number, killer: number): void {
     case RoleId.Innocent:
       if (kRole === RoleId.Traitor) return; // a Traitor killing an Innocent is simply their job
       victimDelta = victimGuilty
-        ? n("css_ttt_karma_inno_on_inno_victim_guilty")
-        : n("css_ttt_karma_inno_on_inno_victim_innocent");
+        ? n("sm_ttt_karma_inno_on_inno_victim_guilty")
+        : n("sm_ttt_karma_inno_on_inno_victim_innocent");
       killerDelta = killerGuilty
-        ? n("css_ttt_karma_inno_on_inno_guilty")
-        : n("css_ttt_karma_inno_on_inno_innocent");
+        ? n("sm_ttt_karma_inno_on_inno_guilty")
+        : n("sm_ttt_karma_inno_on_inno_innocent");
       break;
     case RoleId.Traitor:
       if (kRole === RoleId.Traitor) {
         victimDelta = victimGuilty
-          ? n("css_ttt_karma_traitor_on_traitor_victim_guilty")
-          : n("css_ttt_karma_traitor_on_traitor_victim_innocent");
+          ? n("sm_ttt_karma_traitor_on_traitor_victim_guilty")
+          : n("sm_ttt_karma_traitor_on_traitor_victim_innocent");
         killerDelta = killerGuilty
-          ? n("css_ttt_karma_traitor_on_traitor_guilty")
-          : n("css_ttt_karma_traitor_on_traitor_innocent");
+          ? n("sm_ttt_karma_traitor_on_traitor_guilty")
+          : n("sm_ttt_karma_traitor_on_traitor_innocent");
       } else {
-        killerDelta = n("css_ttt_karma_inno_on_traitor");
+        killerDelta = n("sm_ttt_karma_inno_on_traitor");
       }
       break;
     case RoleId.Detective:
       if (kRole === RoleId.Traitor) {
-        killerDelta = n("css_ttt_karma_traitor_on_detective");
+        killerDelta = n("sm_ttt_karma_traitor_on_detective");
       } else {
         victimDelta = victimGuilty
-          ? n("css_ttt_karma_inno_on_detective_victim_guilty")
-          : n("css_ttt_karma_inno_on_detective_victim_innocent");
+          ? n("sm_ttt_karma_inno_on_detective_victim_guilty")
+          : n("sm_ttt_karma_inno_on_detective_victim_innocent");
         killerDelta = killerGuilty
-          ? n("css_ttt_karma_inno_on_detective_guilty")
-          : n("css_ttt_karma_inno_on_detective_innocent");
+          ? n("sm_ttt_karma_inno_on_detective_guilty")
+          : n("sm_ttt_karma_inno_on_detective_innocent");
       }
       break;
     default:
@@ -392,7 +392,7 @@ function punishLowKarma(slot: number, player: Player): void {
   // to switch punishment OFF would read back the stock ban command and get banned anyway — the
   // exact inversion of what they asked for. `Server.getCvar` returns "" only when it is genuinely
   // cleared, which is the same "do nothing" the C# gets from `string.Format("", userId)`.
-  const command = Server.getCvar("css_ttt_karma_low_command");
+  const command = Server.getCvar("sm_ttt_karma_low_command");
   if (command === "") return;
 
   if (command !== STOCK_LOW_KARMA_COMMAND) {

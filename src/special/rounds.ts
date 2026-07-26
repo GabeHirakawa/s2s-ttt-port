@@ -60,7 +60,7 @@ export function isActive(id: string): boolean {
 function speedOnKill(victimRole: RoleId): void {
   if (!isActive("speed") || victimRole !== RoleId.Innocent) return;
   const remaining = GameRules.get()?.timeRemaining ?? 0;
-  const next = Math.min(remaining + n("css_ttt_special_speed_per_kill"), n("css_ttt_special_speed_max"));
+  const next = Math.min(remaining + n("sm_ttt_special_speed_per_kill"), n("sm_ttt_special_speed_max"));
   setRoundDeadline(next);
 }
 
@@ -91,7 +91,7 @@ const ROUNDS: readonly SpecialRound[] = [
     apply() {
       originalGravity = Server.getCvar("sv_gravity") || "800";
       const base = parseFloat(originalGravity);
-      const scaled = Math.round((Number.isFinite(base) ? base : 800) * n("css_ttt_special_lowgrav_multiplier"));
+      const scaled = Math.round((Number.isFinite(base) ? base : 800) * n("sm_ttt_special_lowgrav_multiplier"));
       Server.setCvar("sv_gravity", String(scaled));
     },
     clear() {
@@ -142,7 +142,7 @@ const ROUNDS: readonly SpecialRound[] = [
     apply() {
       // Starting credits are granted during role assignment, which runs before this round is marked
       // active — so top them up directly rather than trying to intercept that grant.
-      const mult = n("css_ttt_special_rich_bonus_multiplier");
+      const mult = n("sm_ttt_special_rich_bonus_multiplier");
       const active = reg.activeSlots();
       for (let i = 0; i < active.length; i++) {
         const slot = active[i]!;
@@ -159,7 +159,7 @@ const ROUNDS: readonly SpecialRound[] = [
     descKey: "SPECIAL_ROUND_SPEED",
     weight: 1,
     apply() {
-      setRoundDeadline(n("css_ttt_special_speed_initial"));
+      setRoundDeadline(n("sm_ttt_special_speed_initial"));
     },
   },
 ];
@@ -217,7 +217,7 @@ export function startSpecialRounds(forced?: readonly string[]): string[] {
       chosen.push(r);
     }
   } else {
-    const multiChance = n("css_ttt_special_multi_chance");
+    const multiChance = n("sm_ttt_special_multi_chance");
     const provisional = activeRounds.length;
     do {
       const r = pickWeighted();
@@ -272,10 +272,10 @@ export function installSpecialRounds(bus: EventBus<TttEvents>): void {
     if (ev.state !== GameState.InProgress) return;
 
     sinceSpecial++;
-    if (sinceSpecial < n("css_ttt_special_min_rounds_between")) return;
-    if (game.participants < n("css_ttt_special_min_players")) return;
-    if (game.roundsThisMap < n("css_ttt_special_min_rounds_after_map")) return;
-    if (Math.random() > n("css_ttt_special_chance")) return;
+    if (sinceSpecial < n("sm_ttt_special_min_rounds_between")) return;
+    if (game.participants < n("sm_ttt_special_min_players")) return;
+    if (game.roundsThisMap < n("sm_ttt_special_min_rounds_after_map")) return;
+    if (Math.random() > n("sm_ttt_special_chance")) return;
     startSpecialRounds();
   }, { ignoreCanceled: true });
 
@@ -292,7 +292,7 @@ export function installSpecialRounds(bus: EventBus<TttEvents>): void {
     if (ev.reason === RICH_BONUS) return; // never re-multiply our own top-up
     if (ev.newBalance <= ev.oldBalance) return; // gains only
     const gain = ev.newBalance - ev.oldBalance;
-    ev.newBalance = ev.oldBalance + Math.trunc(gain * n("css_ttt_special_rich_gain_multiplier"));
+    ev.newBalance = ev.oldBalance + Math.trunc(gain * n("sm_ttt_special_rich_gain_multiplier"));
   }, { priority: Priority.LOW });
 
   // Speed: killing an Innocent buys the Traitors more time.

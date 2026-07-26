@@ -120,7 +120,7 @@ export function installBombSuppressor(): void {
  * written directly (the C# wrote it and needed a second `SetStateChanged` on the sub-object before
  * the client saw it at all). The engine's own grant path does both correctly, so the suit is given
  * first and the armour value pinned afterwards — `item_assaultsuit` sets its own amount, which need
- * not be what `css_ttt_shop_armor_amount` asks for.
+ * not be what `sm_ttt_shop_armor_amount` asks for.
  *
  * Role loadouts must NOT come through here: `CS2Player.Armor` passed `withHelmet: false`, so the
  * starting armour of every role is helmetless.
@@ -164,7 +164,7 @@ export function onItemPurchase(slot: number, weapon: string): boolean {
 
   // The C#'s two extra "clear the whole gear slot" cases are deliberately not ported, for two
   // different reasons. `weapon_m4a1_silencer -> RemoveWeaponInSlot(0)` is redundant: the m4a1 shop
-  // item this purchase routes to already clears slots 0,1 (`css_ttt_shop_m4a1_clear_slots`).
+  // item this purchase routes to already clears slots 0,1 (`sm_ttt_shop_m4a1_clear_slots`).
   // `weapon_revolver -> RemoveWeaponInSlot(1)` is NOT — the second case keys on weapon_revolver, and
   // only weapon_deagle has a shop alias, so it never reaches the deagle item's own pistol-slot
   // clear. It is dropped because destroying the player's loadout pistol on a buy that grants them

@@ -41,7 +41,7 @@ const VERSION = "0.1.0";
 
 /** Register every command on the plugin context. */
 export function registerCommands(commands: CtxCommands): void {
-  commands.register("ttt", (cmd) => {
+  commands.register("sm_ttt", (cmd) => {
     if (cmd.arg(0).toLowerCase() !== "status") {
       cmd.reply(msgFor(cmd.callerSlot, "CMD_TTT", VERSION));
       return;
@@ -95,7 +95,7 @@ export function registerCommands(commands: CtxCommands): void {
     }
   });
 
-  commands.register("logs", (cmd) => {
+  commands.register("sm_logs", (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Finished) {
       cmd.reply(msgFor(cmd.callerSlot, "GAME_LOGS_NONE"));
       return;
@@ -111,7 +111,7 @@ export function registerCommands(commands: CtxCommands): void {
     printLogsTo(slot);
   });
 
-  commands.register("karma", (cmd) => {
+  commands.register("sm_karma", (cmd) => {
     if (cmd.callerSlot < 0) {
       cmd.reply(msgFor(cmd.callerSlot, "GENERIC_PLAYER_ONLY"));
       return;
@@ -172,16 +172,16 @@ export function registerCommands(commands: CtxCommands): void {
     if (desc !== "" && desc !== item.descKey) cmd.reply(msgFor(cmd.callerSlot, "SHOP_PURCHASED_DETAIL", desc));
   };
 
-  commands.register("balance", balance);
-  commands.register("bal", balance);
-  commands.register("credits", balance);
-  commands.register("points", balance);
-  commands.register("buy", buy);
-  commands.register("purchase", buy);
-  commands.register("b", buy);
-  commands.register("list", list);
+  commands.register("sm_balance", balance);
+  commands.register("sm_bal", balance);
+  commands.register("sm_credits", balance);
+  commands.register("sm_points", balance);
+  commands.register("sm_buy", buy);
+  commands.register("sm_purchase", buy);
+  commands.register("sm_b", buy);
+  commands.register("sm_list", list);
 
-  commands.register("shop", (cmd) => {
+  commands.register("sm_shop", (cmd) => {
     const sub = cmd.arg(0).toLowerCase();
     switch (sub) {
       case "buy":
@@ -202,7 +202,7 @@ export function registerCommands(commands: CtxCommands): void {
   });
 
   // ── admin ─────────────────────────────────────────────────────────────────
-  commands.registerAdmin("ttt_start", ADMFLAG.GENERIC, (cmd) => {
+  commands.registerAdmin("sm_ttt_start", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.Waiting) {
       cmd.reply(msgFor(cmd.callerSlot, "GENERIC_ERROR", "A round is already running"));
       return;
@@ -211,7 +211,7 @@ export function registerCommands(commands: CtxCommands): void {
     cmd.reply("Round starting.");
   });
 
-  commands.registerAdmin("ttt_end", ADMFLAG.GENERIC, (cmd) => {
+  commands.registerAdmin("sm_ttt_end", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Countdown) {
       cmd.reply(msgFor(cmd.callerSlot, "GENERIC_ERROR", "No round is running"));
       return;
@@ -220,7 +220,7 @@ export function registerCommands(commands: CtxCommands): void {
     cmd.reply("Round ended.");
   });
 
-  commands.registerAdmin("ttt_special", ADMFLAG.GENERIC, (cmd) => {
+  commands.registerAdmin("sm_ttt_special", ADMFLAG.GENERIC, (cmd) => {
     const id = cmd.arg(0).toLowerCase();
     if (id === "") {
       cmd.reply(`Available: ${roundIds().join(", ")}`);
@@ -237,7 +237,7 @@ export function registerCommands(commands: CtxCommands): void {
    * no way to put a benched player back in: karma and the sit-out counter are separate state, and
    * the C# build exposed neither (its `!karma` only ever read your own).
    */
-  commands.registerAdmin("ttt_karma", ADMFLAG.GENERIC, (cmd) => {
+  commands.registerAdmin("sm_ttt_karma", ADMFLAG.GENERIC, (cmd) => {
     if (cmd.argCount === 0) {
       const active = reg.activeSlots();
       for (let i = 0; i < active.length; i++) {
@@ -248,7 +248,7 @@ export function registerCommands(commands: CtxCommands): void {
             (out > 0 ? ` (benched ${out} more round${out === 1 ? "" : "s"})` : ""),
         );
       }
-      cmd.reply("[ttt] usage: ttt_karma <slot|name> <value>   (also clears a karma timeout)");
+      cmd.reply("[ttt] usage: sm_ttt_karma <slot|name> <value>   (also clears a karma timeout)");
       return;
     }
 
@@ -279,10 +279,10 @@ export function registerCommands(commands: CtxCommands): void {
   });
 
   /** `ttt_give <target> <item>` — grant a shop item for free (port of the C# `GiveItemCommand`). */
-  commands.registerAdmin("ttt_give", ADMFLAG.GENERIC, (cmd) => {
+  commands.registerAdmin("sm_ttt_give", ADMFLAG.GENERIC, (cmd) => {
     if (cmd.argCount === 0) {
       cmd.reply(`[ttt] items: ${allItems().map((i) => i.id).join(", ")}`);
-      cmd.reply("[ttt] usage: ttt_give <slot|name> <item-id>");
+      cmd.reply("[ttt] usage: sm_ttt_give <slot|name> <item-id>");
       return;
     }
     const slot = resolveTarget(cmd.arg(0));
@@ -306,7 +306,7 @@ export function registerCommands(commands: CtxCommands): void {
    * player, no colour. This is the in-game version — readable at a glance while spectating, which
    * is the only way to follow a round once you are dead.
    */
-  commands.registerAdmin("ttt_roles", ADMFLAG.GENERIC, (cmd) => {
+  commands.registerAdmin("sm_ttt_roles", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Finished) {
       cmd.replyToChat(msg("GAME_LOGS_NONE"));
       return;
@@ -340,7 +340,7 @@ export function registerCommands(commands: CtxCommands): void {
     if (shown === 0) cmd.replyToChat(msg("GAME_LOGS_NONE"));
   });
 
-  commands.registerAdmin("ttt_setrole", ADMFLAG.GENERIC, (cmd) => {
+  commands.registerAdmin("sm_ttt_setrole", ADMFLAG.GENERIC, (cmd) => {
     const slot = cmd.argInt(0, -1);
     const roleName_ = cmd.arg(1).toLowerCase();
     const role =
