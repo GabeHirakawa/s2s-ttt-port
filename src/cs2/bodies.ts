@@ -13,7 +13,7 @@
 
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
-import { RoleId } from "../core/enums";
+import { MoveType, RoleId } from "../core/enums";
 import { pawnOf } from "./pawn";
 import { roleModel } from "./icons";
 import { wrapEntity } from "@s2script/cs2";
@@ -177,10 +177,6 @@ export function spawnBody(
 const COLLISION_GROUP_DEBRIS = 5;
 /** `SolidType_t::SOLID_VPHYSICS` — collision comes from the physics model, which a ragdoll has. */
 const SOLID_VPHYSICS = 6;
-/** `MoveType_t::MOVETYPE_VPHYSICS` — the ragdoll simulates and settles. 5; 9 is MOVETYPE_LADDER. */
-const MOVETYPE_VPHYSICS = 5;
-/** `MoveType_t::MOVETYPE_FLY` — stops simulating, so a settled corpse stays put. 3; 5 is VPHYSICS. */
-const MOVETYPE_FLY = 3;
 
 /**
  * Make the corpse a piece of debris: solid to the world, transparent to players and bullets.
@@ -202,7 +198,7 @@ function configureCorpsePhysics(ref: EntityRef): void {
   e.collision.collisionGroup = COLLISION_GROUP_DEBRIS;
   e.collision.collisionAttribute.collisionGroup = COLLISION_GROUP_DEBRIS;
   e.collision.solidType = SOLID_VPHYSICS;
-  e.moveType = MOVETYPE_VPHYSICS;
+  e.moveType = MoveType.VPhysics;
 }
 
 /**
@@ -223,7 +219,7 @@ export function settleBody(body: Body): void {
   // MOVETYPE_FLY before the teleport, exactly as `correctRagdoll` does: it takes the ragdoll out of
   // physics simulation so the placement below is final. Simulating meant the body could still drift
   // or be shoved after being positioned, which is what made corpses fight the settle passes.
-  wrapEntity("CRagdollProp", body.ref).moveType = MOVETYPE_FLY;
+  wrapEntity("CRagdollProp", body.ref).moveType = MoveType.Fly;
   body.ref.teleport([body.x, body.y, body.z + 8], null, [0, 0, 0]);
 }
 

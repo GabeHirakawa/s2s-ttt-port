@@ -110,6 +110,14 @@ export const UTILITY: ReadonlySet<string> = new Set([
 ]);
 
 /** Gear slot indices, matching the C# `gear_slot_t` mapping. */
+/**
+ * INTERNAL classification only — these are NOT the game's `gear_slot_t` values.
+ *
+ * They agree for Rifle/Pistol/Knife/C4 (0/1/2/4) but `Utility = 3` is the game's
+ * `GEAR_SLOT_GRENADES`; its `GEAR_SLOT_UTILITY` is 12. Harmless while {@link slotOf} is a static
+ * classification by class name and nothing reads `m_GearSlot` off a weapon — but the moment anything
+ * does, these must be reconciled rather than assumed to line up.
+ */
 export const enum GearSlot {
   Rifle = 0,
   Pistol = 1,
