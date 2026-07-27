@@ -193,20 +193,44 @@ const SPECS: readonly Spec[] = [
   S("sm_ttt_shop_tripwire_price", "int", 45, "Price of the Tripwire (Traitor)", 0, 10000),
   S("sm_ttt_shop_tripwire_explosion_power", "int", 1000, "Tripwire explosion damage", 0, 100000),
   // 0.02 is `TripwireConfig.FalloffDelay`; the exponential falloff curve is calibrated on it.
-  S("sm_ttt_shop_tripwire_falloff_delay", "float", 0.02, "Tripwire damage falloff rate", 0, 10),
+  // 0.015, the C#'s `CV_FALLOFF_DELAY`. It had drifted to 0.02, which is a much steeper curve than it
+  // looks: 1000 * e^(-d * k) gives 223 damage at 100u with 0.015 and only 135 with 0.02, and by 200u
+  // it is 50 against 18. The tripwire read as barely hurting anyone. The comment on the damage
+  // calculation in `effects.ts` was already written against the 223 figure, so the constant was the
+  // thing that was wrong, not the maths.
+  S("sm_ttt_shop_tripwire_falloff_delay", "float", 0.015, "Tripwire damage falloff rate", 0, 10),
   S("sm_ttt_shop_tripwire_friendlyfire_multiplier", "float", 0.5, "Tripwire friendly-fire multiplier", 0, 10),
   S("sm_ttt_shop_tripwire_friendlyfire_triggers", "bool", true, "Whether teammates trigger a Tripwire"),
   S("sm_ttt_shop_tripwire_friendlyfire_karma_penalty_time", "int", 15, "Seconds a Tripwire teamkill costs karma (-1 = always)", -1, 3600),
   S("sm_ttt_shop_tripwire_max_distance_squared", "float", 50000, "Max Tripwire placement distance squared", 0, 10000000),
+  // How far the wire reaches for the opposite surface. Was a hardcoded 512 — shorter than most rooms,
+  // so a wire strung anywhere but a doorway found nothing and fell back to a stub. The C# puts no
+  // length on its span trace, so this is generous by default.
+  S("sm_ttt_shop_tripwire_max_span", "float", 4096, "How far a Tripwire reaches for the opposite surface", 64, 16384),
+  // OFF by default pending investigation. The glow twin is an extra NETWORKED prop carrying a
+  // per-viewer transmit rule, and a client hard-crashed inside the network system (Plat_FatalError
+  // via libnetworksystem) shortly after this shipped. That is the same failure class as the earlier
+  // `CopyExistingEntity: missing client entity` fatals, and an entity that some clients are told
+  // about and others are not is the most plausible source of one. Not proven — which is exactly why
+  // it defaults off rather than staying on.
+  S("sm_ttt_shop_tripwire_glow", "bool", false, "Traitor-only glow on placed Tripwires"),
+  // --- crash bisect switches ---------------------------------------------------------------
+  // Clients have hard-crashed with `CopyExistingEntity: missing client entity N`, which is what a
+  // client says about an entity it was never sent. TRANSMIT FILTERING is the only mechanism here
+  // that deliberately withholds an entity from some clients, and role icons are the entities it is
+  // applied to. These exist so the suspicion can be tested by flipping one convar between rounds
+  // instead of shipping another guess.
+  S("sm_ttt_icons_enabled", "bool", true, "Role icons above heads (transmit-filtered). Off = bisect"),
+  S("sm_ttt_bodies_enabled", "bool", true, "Corpses on death. Off = bisect"),
   S("sm_ttt_shop_tripwire_initiation_time", "float", 2, "Seconds before a Tripwire arms", 0, 60),
   // `TripwireConfig.TripwireSizeSquared`. SQUARED units: 500 is a ~22u radius. The 10 this used to
   // default to is 3.2u, which is smaller than a player and left both the walk-through trigger and
   // the shoot-it trigger unhittable in practice.
   S("sm_ttt_shop_tripwire_size_squared", "float", 500, "Tripwire hit-detection radius squared", 0, 100000),
-  // 2, not the C#'s 0.5. The body-carry beam in `interact.ts` renders at width 2 with the same
-  // alpha 32, and at 0.5 the wire is invisible in CS2 while its anchor props show fine — measured on
-  // a live server, where the tripwire read as "props spawned, no beam".
-  S("sm_ttt_shop_tripwire_thickness", "float", 2, "Tripwire beam thickness", 0.1, 10),
+  // Back to the C#'s 0.5. It was raised to 2 while the wire appeared to be missing, but the beam was
+  // never too thin — it had ZERO LENGTH, because the span traced along the player's aim into the wall
+  // it had just hit instead of along the surface normal. With the geometry fixed, 2 is simply too fat.
+  S("sm_ttt_shop_tripwire_thickness", "float", 0.5, "Tripwire beam thickness", 0.1, 10),
   S("sm_ttt_shop_tripwire_defuse_time", "float", 6, "Seconds to fully defuse a Tripwire", 0.1, 60),
   S("sm_ttt_shop_tripwire_defuse_rate", "float", 0.5, "Seconds between defuse ticks", 0.05, 10),
   S("sm_ttt_shop_tripwire_defuse_reward", "int", 20, "Credits for defusing a Tripwire", 0, 10000),
@@ -232,8 +256,11 @@ const SPECS: readonly Spec[] = [
   // ON by default, unlike the C# (`StripWeaponsPriorToEquipping = false`). The C# could afford that
   // because its rounds ride the engine's own restart, which clears inventories; TTT rounds here begin
   // without one, so anything held simply carried over and players accumulated weapons round on round.
-  // The knife and any pistol are kept — see `stripToSidearms`.
-  S("sm_ttt_strip_on_assign", "bool", true, "Strip primaries/utility (keep knife + pistol) before role loadouts"),
+  //
+  // Applied when the round ENDS, not when roles are dealt: the pre-round window is when players arm
+  // themselves off the map, and stripping at assignment took that away. The knife and any pistol are
+  // always kept — see `stripToSidearms`.
+  S("sm_ttt_strip_on_assign", "bool", true, "Strip primaries/utility (keep knife + pistol) at round end"),
   S("sm_ttt_prop_pickup", "bool", true, "Allow players to carry props and bodies with USE"),
 ];
 
@@ -334,6 +361,8 @@ export const cfg = {
   afkSeconds: 60,
   showNames: true,
   stripOnAssign: false,
+  iconsEnabled: true,
+  bodiesEnabled: true,
   propPickup: true,
   /** Health by {@link RoleId} index. */
   roleHealth: new Int32Array(5),
@@ -363,6 +392,8 @@ function rebuild(): void {
   cfg.afkSeconds = n("sm_ttt_afk_seconds");
   cfg.showNames = b("sm_ttt_show_names");
   cfg.stripOnAssign = b("sm_ttt_strip_on_assign");
+  cfg.iconsEnabled = b("sm_ttt_icons_enabled");
+  cfg.bodiesEnabled = b("sm_ttt_bodies_enabled");
   cfg.propPickup = b("sm_ttt_prop_pickup");
 
   // RoleId: 1 = Innocent, 2 = Traitor, 3 = Detective.

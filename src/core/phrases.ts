@@ -128,6 +128,14 @@ export const PHRASES: Readonly<Record<string, string>> = {
     "%DNA_PREFIX%You scanned {1}{2}'%s% {grey}body, their killer was {red}{3}{grey}.",
   SHOP_ITEM_DNA_SCANNED_OTHER: "%DNA_PREFIX%You scanned {1}{2}'%s% {grey}body, {3}.",
   SHOP_ITEM_DNA_EXPIRED: "%DNA_PREFIX%You scanned {1}{2}'%s% {grey}body, but the DNA has expired.",
+  // The scan no longer NAMES the killer — it hands over a trace to follow. Identifying whoever left
+  // it is the Detective's job, and the point of the item.
+  SHOP_ITEM_DNA_TRACE: "%DNA_PREFIX%You recovered a trace from {1}{2}'%s% {grey}body. Find whoever left it.",
+  DNA_TRACK_SEARCHING: "Searching for a match...",
+  DNA_TRACK_ATTEMPTING: "Attempting to identify killer...",
+  DNA_TRACK_ALMOST: "Almost there...",
+  DNA_TRACK_IDENTIFYING: "Identifying...",
+  DNA_TRACK_IDENTIFIED: "Killer identified: {1}",
   SHOP_ITEM_STATION_HEALTH: "Health Station",
   SHOP_ITEM_STATION_HEALTH_DESC: "The health station will heal all players around it",
   SHOP_ITEM_STATION_HURT: "Hurt Station",
