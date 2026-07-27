@@ -269,23 +269,26 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
   const model = roleModel(role);
   const base = slot * PARTS;
 
-  const relay = createEntity("prop_dynamic");
+  // The model is a SPAWN KEYVALUE: `createEntity` with keyvalues does create + DispatchSpawn in one
+  // call, so the model is in place AS the entity spawns.
+  //
+  // Both orderings either side of that are wrong, and each was tried on a live server:
+  //   setModel BEFORE spawn -> `SetupModel()` assertion ("the entity is still in the staging list"),
+  //     leaving a half-initialised SKELETAL entity to be networked. Clients hard-errored out with
+  //     `CopyExistingEntity: missing client entity N`.
+  //   setModel AFTER spawn  -> `prop_dynamic at (0.000, 0.000, 0.000) has no model name!` — a
+  //     prop_dynamic needs its model at spawn time, so it spawns broken and the later setModel is
+  //     too late.
+  //
+  // The keyvalue form was dismissed once before on the grounds that it "did not apply the model".
+  // That test was confounded: the render mode was wrong in the same build, so the glow was invisible
+  // either way and the keyvalue took the blame.
+  const relay = createEntity("prop_dynamic", { model, targetname: `ttt_glow_relay_${slot}` });
   if (relay === null) return false;
-  relay.setModel(model);
-  if (!relay.spawn({ targetname: `ttt_glow_relay_${slot}` })) {
-    relay.remove();
-    return false;
-  }
 
-  const glow = createEntity("prop_dynamic");
+  const glow = createEntity("prop_dynamic", { model, targetname: `ttt_glow_${slot}` });
   if (glow === null) {
     relay.remove();
-    return false;
-  }
-  glow.setModel(model);
-  if (!glow.spawn({ targetname: `ttt_glow_${slot}` })) {
-    relay.remove();
-    glow.remove();
     return false;
   }
 

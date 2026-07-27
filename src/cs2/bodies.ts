@@ -114,23 +114,25 @@ export function spawnBody(
   const previous = bodyOfPlayer(slot);
   if (previous !== undefined) removeBody(previous);
 
-  // Create -> setModel -> spawn, in that order.
+  // The model is a SPAWN KEYVALUE — create + DispatchSpawn in one call, model in place as it spawns.
   //
-  // A `prop_ragdoll` must have its model set BEFORE `DispatchSpawn`: spawning one with no resolved
-  // model leaves it with no physics representation and the engine tears it down again a moment
-  // later (it reads as created, then goes invalid). Passing `model` as a spawn keyvalue is not
-  // equivalent. This is the order the C# `BodySpawner` used, and it needs `EntityRef.setModel`,
-  // which only resolves from runtime v0.4.0 onward.
+  // Both alternatives were tried live and both are wrong. `setModel` BEFORE spawn fired, on every
+  // single death:
+  //     skeletoninstance.cpp (5337) : Assertion Failed in function SetupModel():
+  //     0 == ( pInstance->GetOwnerEntity()->GetEntityIdentity()->GetFlags() & EF_IN_STAGING_LIST )
+  // which leaves a half-initialised skeletal entity to be networked, and clients hard-errored out
+  // with `CopyExistingEntity: missing client entity N`. Moving `setModel` AFTER spawn removed the
+  // assertion and replaced it with something worse: the ragdoll spawns with no model at all, and the
+  // server took a SIGSEGV shortly after the next death.
+  //
+  // The C# can call SetModel before DispatchSpawn because it CLEARS the staging bit first
+  // (`...Entity.Flags & ~(1 << 2)` in `BodySpawner.makeGameRagdoll`). Nothing here exposes a setter
+  // for those flags — `EntityRef.identityFlags()` is read-only — so the keyvalue is the way to have
+  // the model present at spawn without ever touching a staged entity.
   //
   // Collision and movement are configured below, after the spawn — see `configureCorpsePhysics`.
-  const ragdoll = createEntity("prop_ragdoll");
+  const ragdoll = createEntity("prop_ragdoll", { model, targetname: `ttt_body_${slot}` });
   if (ragdoll === null) return null;
-
-  if (!ragdoll.setModel(model)) console.warn(`[ttt] corpse model rejected: ${model}`);
-  if (!ragdoll.spawn({ targetname: `ttt_body_${slot}` })) {
-    ragdoll.remove();
-    return null;
-  }
 
   configureCorpsePhysics(ragdoll);
 
