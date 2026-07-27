@@ -33,7 +33,7 @@ import { checkEndConditions, inProgress } from "../game/game";
 import { roleName, roleNameFor } from "../game/roles";
 import { logDamage, logDeath } from "../game/logger";
 import { settleBody, spawnBody } from "./bodies";
-import { clearAttributedKills, setArmor, setHealth, takeAttributedKiller, tell } from "./pawn";
+import { clearAttributedKills, pawnOf, setArmor, setHealth, takeAttributedKiller, tell } from "./pawn";
 import { resetPawnColor, setPawnAlpha } from "./color";
 import { spoofAlive, unspoofAlive } from "./spoof";
 import { refreshInvulnerability } from "./handlers";
@@ -372,9 +372,54 @@ export function installMatchStats(bus: EventBus<TttEvents>): void {
  * import this module without closing a cycle through `handlers.ts`. `onDeathPre` consumes both and
  * prefers this one, which is the only one that can also carry a weapon name and the no-corpse flag.
  */
+/**
+ * The bus, captured from the death hook so {@link killWithGadget} can drive the same path.
+ *
+ * `player_death` reaches us for engine kills, which is where this is set; a gadget kill needs the bus
+ * without an event to carry it.
+ */
+let deathBus: EventBus<TttEvents> | null = null;
+
+/** Give the gadget-kill path a bus before any engine death has happened. */
+export function setDeathBus(bus: EventBus<TttEvents>): void {
+  deathBus = bus;
+}
+
 const pendingKiller = new Int32Array(MAX_SLOTS).fill(-1);
 const pendingWeapon = new Array<string>(MAX_SLOTS).fill("");
 const pendingNoBody = new Uint8Array(MAX_SLOTS);
+
+/**
+ * Kill `victim` and credit `killer`, driving the TTT death path DIRECTLY.
+ *
+ * `pawn.slay()` (CommitSuicide) does NOT produce a `player_death` we receive — verified on a live
+ * server: the hook that handles every engine kill never fired once for a slay, while the pawn ended
+ * up dead with `hp=0`. Everything TTT does on a death therefore never happened for a gadget kill: no
+ * corpse to find, no kill attribution, no karma, no `setAlive(false)`, and — worst — no win check, so
+ * a round whose last Innocent died to a tripwire simply never ended.
+ *
+ * The consequences are run BEFORE the pawn is slain, because `spawnBody` reads the pawn's origin to
+ * place the corpse and a slain pawn no longer has one.
+ */
+export function killWithGadget(
+  victim: number,
+  killer: number,
+  weapon: string,
+  suppressBody = false,
+): void {
+  if (victim < 0 || victim >= MAX_SLOTS) return;
+  if (!reg.isAlive(victim)) return;
+  const bus = deathBus;
+  if (bus === null) return;
+
+  markGadgetKill(victim, killer, weapon, suppressBody);
+  // Corpse, attribution, karma, alive-spoof, death event, win check — the same work an engine death
+  // does, in the same order.
+  handleDeath(bus, victim, killer, -1, weapon, false);
+  clearGadgetKill(victim);
+  // Now make the engine agree. Last, so the pawn still has an origin while the corpse is placed.
+  pawnOf(victim)?.slay();
+}
 
 /**
  * Record who is about to kill `victim` with a gadget. Call this IMMEDIATELY BEFORE the health write
@@ -415,6 +460,7 @@ export function clearGadgetKills(): void {
  * the killer is a Traitor) their fellow Traitors — the C# `CombatHandler.OnPlayerDeath_Pre`.
  */
 export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultValue | void {
+  deathBus = bus;
   const victim = ev.getPlayerSlot("userid");
   if (victim < 0) return;
 
@@ -502,8 +548,16 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
       const assisterUserId = Player.fromSlot(assister)?.userId ?? -1;
       if (assisterUserId >= 0) fields.assister = assisterUserId;
     }
-    Events.fireToClient(killer, "player_death", fields);
-
+    // The KILLER is not re-fired to. They already see the kill.
+    //
+    // The C# does re-fire to the attacker, and this followed it — but on this build it produces TWO
+    // kill-feed entries for the killer and one for everyone else entitled to see it. Instrumenting
+    // proved the duplicate is not ours: exactly one dispatch per death reached the killer, the
+    // traitor loop already skips them, `fireToClient` cannot re-enter our own pre-hook, and the
+    // suppression path (`HookResult.Handled` -> re-fire with bDontBroadcast) is what hides the death
+    // from everyone else. The second entry is the client's own, which the suppression does not reach.
+    //
+    // Fellow Traitors still need theirs: they are not the killer, so nothing renders it for them.
     if (reg.roleOf(killer) === RoleId.Traitor) {
       const active = reg.activeSlots();
       for (let i = 0; i < active.length; i++) {

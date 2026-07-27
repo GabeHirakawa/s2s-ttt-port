@@ -18,13 +18,13 @@ import { GameState, RoleId } from "./core/enums";
 import { cfg } from "./core/cvars";
 import { msg, msgFor } from "./core/msgs";
 import * as reg from "./core/registry";
-import { getHealth, teamOf, tellAll } from "./cs2/pawn";
+import { getHealth, setHealth, teamOf, tellAll } from "./cs2/pawn";
 import { game, inWarmup, startGame, endGame } from "./game/game";
 import { reserveRole, roleName, roleNameFor } from "./game/roles";
 import { printLogsTo } from "./game/logger";
 import { allBodies } from "./cs2/bodies";
 import { Entity } from "@s2script/sdk/entity";
-import { damageDiag } from "./cs2/combat";
+import { damageDiag, killWithGadget } from "./cs2/combat";
 import { Voice } from "@s2script/sdk/voice";
 import { adminSetKarma, karmaOf, timeoutRemaining } from "./karma/karma";
 import {
@@ -368,6 +368,62 @@ export function registerCommands(commands: CtxCommands): void {
    * ROOT rather than GENERIC because choosing to be a Traitor is not moderation — it decides the
    * round for everyone in it.
    */
+  /**
+   * `sm_ttt_testkill <victim> [killer]` — kill someone and credit a Traitor for it. ROOT only.
+   *
+   * A testing aid for everything that keys off WHO killed WHOM: the DNA scanner, the corpse's killer
+   * record, karma, the kill feed. Producing that state by hand otherwise means two people, two roles
+   * and a real firefight.
+   *
+   * `killer` defaults to a living Traitor, since that is the case worth testing. It goes through
+   * `markGadgetKill`, the same attribution path the tripwire and cluster fragments use, so the corpse
+   * records a real killer rather than the suicide a bare health write would produce.
+   */
+  commands.registerAdmin("sm_ttt_testkill", ADMFLAG.ROOT, (cmd) => {
+    if (cmd.arg(0) === "") {
+      cmd.reply("usage: sm_ttt_testkill <victim> [killer]  (killer defaults to a live Traitor)");
+      return;
+    }
+    const victim = resolveTarget(cmd.arg(0));
+    if (victim < 0) {
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_NO_PLAYER_MATCH", cmd.arg(0)));
+      return;
+    }
+    if (!reg.isAlive(victim)) {
+      cmd.reply(`${reg.nameOf(victim)} is already dead`);
+      return;
+    }
+
+    let killer = -1;
+    if (cmd.arg(1) !== "") {
+      killer = resolveTarget(cmd.arg(1));
+      if (killer < 0) {
+        cmd.reply(msgFor(cmd.callerSlot, "CMD_NO_PLAYER_MATCH", cmd.arg(1)));
+        return;
+      }
+    } else {
+      const active = reg.activeSlots();
+      for (let i = 0; i < active.length; i++) {
+        const slot = active[i]!;
+        if (slot !== victim && reg.isAlive(slot) && reg.roleOf(slot) === RoleId.Traitor) {
+          killer = slot;
+          break;
+        }
+      }
+      if (killer < 0) {
+        cmd.reply("no living Traitor to credit — pass one explicitly: sm_ttt_testkill <victim> <killer>");
+        return;
+      }
+    }
+    if (killer === victim) {
+      cmd.reply("killer and victim must differ, or the corpse records a suicide and carries no DNA");
+      return;
+    }
+
+    killWithGadget(victim, killer, "[Test Kill]");
+    cmd.reply(`killed ${reg.nameOf(victim)}, credited to ${reg.nameOf(killer)} (${roleName(reg.roleOf(killer))})`);
+  });
+
   commands.registerAdmin("sm_ttt_myrole", ADMFLAG.ROOT, (cmd) => {
     const me = cmd.callerSlot;
     if (me < 0) {

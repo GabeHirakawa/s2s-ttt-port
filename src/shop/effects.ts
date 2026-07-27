@@ -20,7 +20,7 @@ import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import { Vector } from "@s2script/sdk/math";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
-import { Beam, Fade, type BeamHandle } from "@s2script/cs2";
+import { Beam, Fade, wrapEntity, type BeamHandle } from "@s2script/cs2";
 import { hudLine, HUD_FONT_BIG, HUD_FONT_SMALL, setCenterHud } from "../cs2/hud";
 import { Server } from "@s2script/sdk/server";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
@@ -30,7 +30,8 @@ import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, tell } from "../cs2/pawn";
-import { colorCorpse, setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
+import { colorCorpse, ROLE_COLORS, setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
+import { restrictToTraitors } from "../cs2/icons";
 import {
   give, resolveWeapon, weaponClass, KNIVES, PISTOLS, RIFLES, type HeldWeapon,
 } from "../cs2/inventory";
@@ -38,7 +39,7 @@ import { allBodies, type Body } from "../cs2/bodies";
 // Closes a module cycle (`combat` -> `handlers` -> `effects`). Safe: every edge is a hoisted
 // function called at event time, and nothing in this file is read while a module is still
 // evaluating.
-import { markGadgetKill } from "../cs2/combat";
+import { killWithGadget, markGadgetKill } from "../cs2/combat";
 import { addBalance } from "./shop";
 import { poisonShotsLeft } from "./weaponfx";
 import { suppressKarmaOnce } from "../karma/karma";
@@ -153,6 +154,9 @@ interface Tripwire {
   /** The two anchor props, one at each end of the wire. Either may be null if creation failed. */
   propA: EntityRef | null;
   propB: EntityRef | null;
+  /** Traitor-only glow twins overlaying the anchors. Null when not created or refused. */
+  glowA: EntityRef | null;
+  glowB: EntityRef | null;
   ax: number; ay: number; az: number;
   bx: number; by: number; bz: number;
   /** Seconds until it arms. */
@@ -198,23 +202,86 @@ export function precacheEffectModels(pc: PrecacheContext): void {
 }
 
 /**
- * One tripwire anchor prop, placed against the surface at `(x, y, z)`.
+ * One tripwire anchor prop, laid flat against the surface at `(x, y, z)` with normal `(nx, ny, nz)`.
  *
- * SPAWN FIRST, THEN `setModel`. The C# carries the reason verbatim: `SetModel` routes through
- * `SetupModel`, which asserts the entity is no longer in the staging list, and only `DispatchSpawn`
- * clears that. Setting this particular (skeletal) model while staged hard-crashes the server in the
- * C#; here it logs an assertion and leaves the prop modelless, which looks exactly like the prop not
- * existing at all.
+ * ORIENTED BY THE SURFACE NORMAL, as the C# does (`originTrace.Normal.toAngle()`). Spawning it with
+ * no angles left the panel lying at whatever default rotation the model has — sideways on a wall, and
+ * visibly not attached to it.
+ *
+ * Nudged 1 unit out along the normal as well: placed exactly on the traced surface, half the prop is
+ * inside the brush.
+ *
+ * The model is a SPAWN KEYVALUE. `setModel` after spawn leaves a `prop_dynamic at (0,0,0) has no
+ * model name!` — the prop spawns broken and the later call is too late — and `setModel` before spawn
+ * trips the `SetupModel()` staging assertion. Same trap as the corpses and the glow props.
  */
-function spawnTripwireProp(x: number, y: number, z: number, name: string): EntityRef | null {
-  const prop = createEntity("prop_dynamic");
+function spawnTripwireProp(
+  x: number, y: number, z: number,
+  nx: number, ny: number, nz: number,
+  name: string,
+): EntityRef | null {
+  const prop = createEntity("prop_dynamic", { model: TRIPWIRE_MODEL, targetname: name });
   if (prop === null) return null;
-  if (!prop.spawn({ targetname: name })) {
-    prop.remove();
-    return null;
-  }
-  prop.setModel(TRIPWIRE_MODEL);
-  prop.teleport([x, y, z], null, null);
+
+  // Direction -> Source angles: yaw about Z, pitch from the vertical component. Roll is 0 — a normal
+  // says nothing about spin around itself, and the C# leaves it at zero too.
+  const deg = 180 / Math.PI;
+  const yaw = Math.atan2(ny, nx) * deg;
+  const pitch = Math.atan2(-nz, Math.sqrt(nx * nx + ny * ny)) * deg;
+  prop.teleport([x + nx, y + ny, z + nz], [pitch, yaw, 0], null);
+  return prop;
+}
+
+/**
+ * `RenderMode_t::kRenderTransAlpha` — the value that hides a prop while still drawing its glow.
+ *
+ * NOT `kRenderNone`. That is the semantically obvious choice and it is wrong: at kRenderNone the
+ * engine drops the entity from rendering altogether and takes the glow pass with it, so every glow
+ * field reads back correct and nothing appears. Learned the hard way on the Traitor glow.
+ */
+const GLOW_RENDER_TRANS_ALPHA = 1;
+
+/**
+ * A Traitor-only glow twin sitting on a tripwire anchor.
+ *
+ * The anchor itself must NOT glow. Glow has no per-viewer form, so a glowing anchor glows for
+ * everyone and hands Innocents the wire's location; and hiding the anchor from Innocents is worse
+ * still, since finding and defusing a wire is their counter-play. So the real anchor stays visible to
+ * all and un-glowing, and a second copy — invisible except for its outline, and transmitted only to
+ * Traitors — is laid over it.
+ *
+ * No bone-merge relay here, unlike the player glow: a tripwire anchor does not animate, so the twin
+ * can simply be parked at the same place.
+ */
+function spawnTripwireGlow(
+  x: number, y: number, z: number,
+  nx: number, ny: number, nz: number,
+  name: string,
+): EntityRef | null {
+  const c = ROLE_COLORS[RoleId.Traitor];
+  if (c === undefined) return null;
+  const prop = createEntity("prop_dynamic", { model: TRIPWIRE_MODEL, targetname: name });
+  if (prop === null) return null;
+
+  const deg = 180 / Math.PI;
+  const yaw = Math.atan2(ny, nx) * deg;
+  const pitch = Math.atan2(-nz, Math.sqrt(nx * nx + ny * ny)) * deg;
+  prop.teleport([x + nx, y + ny, z + nz], [pitch, yaw, 0], null);
+
+  const f = wrapEntity("CBaseModelEntity", prop);
+  f.renderMode = GLOW_RENDER_TRANS_ALPHA;
+  const g = f.glow;
+  g.glowColorOverride = ((c.r & 0xff) | ((c.g & 0xff) << 8) | ((c.b & 0xff) << 16) | (255 << 24)) >>> 0;
+  g.glowType = 3;
+  g.glowTeam = -1;
+  g.glowRange = 5000;
+  g.glowRangeMin = 0;
+  // Written LAST: the others are read when the glow switches on, so flipping this first can latch a
+  // half-configured outline for a frame.
+  g.glowing = true;
+
+  // Fail-closed: a refused rule destroys the twin rather than showing every player where the wire is.
+  if (!restrictToTraitors(prop)) return null;
   return prop;
 }
 
@@ -512,8 +579,14 @@ function tickStations(dt: number): void {
       // `DamageStation.applyDamage` dispatched a `PlayerDeathEvent.WithKiller(dominantInfo.Owner)
       // .WithWeapon("[Hurt Station]")` on the tick that would kill. Without it this bare health
       // write reaches the engine with no attacker and the kill scores as the victim's own suicide.
-      if (!heals && next <= 0) markGadgetKill(slot, st.owner, "[Hurt Station]");
-      setHealth(slot, next);
+      if (!heals && next <= 0) {
+        // A lethal gadget tick must go through `killWithGadget`: a bare health write reaches <= 0 via
+        // `slay()`, which produces NO death event, so the corpse, attribution, karma and win check
+        // all silently never happen.
+        killWithGadget(slot, st.owner, "[Hurt Station]");
+      } else {
+        setHealth(slot, next);
+      }
       st.given += amount < 0 ? -amount : amount;
     }
   }
@@ -668,31 +741,42 @@ export function placeTripwire(slot: number): boolean {
   // INTO the wall just hit, so the second trace ends where it began, `end` collapses onto `start`,
   // and the beam is zero length: the anchor props appear and no wire is ever visible.
   //
-  // Started 2u off the surface so the ray does not begin inside the brush it is leaving.
+  // Three distinct points, which were previously conflated:
+  //   surfaceA / surfaceB — where the wall actually is. The ANCHORS go here.
+  //   rayStart            — 2u off surfaceA, so the span trace does not begin inside the brush.
+  //   beam ends           — pulled 1u off each surface so the wire terminates AT its anchors.
+  //
+  // Passing `rayStart` as the anchor position is what left the near button hanging in the air: it is
+  // already 2u out, and `spawnTripwireProp` nudges another 1u along the normal, so the panel sat 3
+  // units off the wall. Drawing the beam all the way to `surfaceB` is what made it overshoot the far
+  // anchor and disappear into the wall behind it.
   const nrm = first.normal;
   const nLen = Math.sqrt(nrm.x * nrm.x + nrm.y * nrm.y + nrm.z * nrm.z) || 1;
   const nx = nrm.x / nLen;
   const ny = nrm.y / nLen;
   const nz = nrm.z / nLen;
-  const start = new Vector(
-    first.endPos.x + nx * 2,
-    first.endPos.y + ny * 2,
-    first.endPos.z + nz * 2,
-  );
+
+  const surfaceA = new Vector(first.endPos.x, first.endPos.y, first.endPos.z);
+  const rayStart = new Vector(surfaceA.x + nx * 2, surfaceA.y + ny * 2, surfaceA.z + nz * 2);
+
+  // How far a wire may reach for the opposite surface. This was a hardcoded 512 (~13 feet), which is
+  // shorter than most rooms and made the item feel broken in anything but a doorway. The C# puts no
+  // length on its span trace at all, so this is a cvar with a generous default rather than a constant.
+  const span = n("sm_ttt_shop_tripwire_max_span");
   const far = Trace.line(
-    start,
-    new Vector(
-      start.x + nx * 512,
-      start.y + ny * 512,
-      start.z + nz * 512,
-    ),
+    rayStart,
+    new Vector(rayStart.x + nx * span, rayStart.y + ny * span, rayStart.z + nz * span),
     { mask: TraceMask.WorldOnly },
   );
-  // Nothing opposite within 512u (an open area): run the wire out along the normal anyway rather
-  // than straight up, so it still spans something the player can walk into.
-  const end = far.didHit
+  // Nothing opposite within the span (an open area): run the wire out along the normal anyway rather
+  // than straight up, so it still spans something a player can walk into.
+  const surfaceB = far.didHit
     ? far.endPos
-    : new Vector(start.x + nx * 128, start.y + ny * 128, start.z + nz * 128);
+    : new Vector(rayStart.x + nx * 128, rayStart.y + ny * 128, rayStart.z + nz * 128);
+
+  // The beam stops at the anchors, not at the brickwork behind them.
+  const start = new Vector(surfaceA.x + nx, surfaceA.y + ny, surfaceA.z + nz);
+  const end = new Vector(surfaceB.x - nx, surfaceB.y - ny, surfaceB.z - nz);
 
   const color: [number, number, number, number] = [
     n("sm_ttt_shop_tripwire_color_r"),
@@ -703,8 +787,18 @@ export function placeTripwire(slot: number): boolean {
   const beam = Beam.draw(start, end, { color, width: n("sm_ttt_shop_tripwire_thickness") });
 
   // An anchor at each end, as in the C#: the wire is two panels with a beam strung between them.
-  const propA = spawnTripwireProp(start.x, start.y, start.z, `ttt_tripwire_a_${slot}`);
-  const propB = spawnTripwireProp(end.x, end.y, end.z, `ttt_tripwire_b_${slot}`);
+  // Each anchor faces out of the surface it is stuck to: the near one along the hit normal, the far
+  // one along the opposite (it is on the wall across the gap, facing back).
+  const propA = spawnTripwireProp(surfaceA.x, surfaceA.y, surfaceA.z, nx, ny, nz, `ttt_tripwire_a_${slot}`);
+  const propB = spawnTripwireProp(surfaceB.x, surfaceB.y, surfaceB.z, -nx, -ny, -nz, `ttt_tripwire_b_${slot}`);
+  // Traitor-only outlines over both anchors, so a Traitor can see where a team-mate wired a doorway
+  // without walking into it. Innocents see the plain anchors exactly as before.
+  //
+  // Gated: see `sm_ttt_shop_tripwire_glow`. These are extra networked props with a per-viewer
+  // transmit rule, and they are the prime suspect for a client-side network fatal.
+  const glowOn = b("sm_ttt_shop_tripwire_glow");
+  const glowA = !glowOn ? null : spawnTripwireGlow(surfaceA.x, surfaceA.y, surfaceA.z, nx, ny, nz, `ttt_tripwire_glow_a_${slot}`);
+  const glowB = !glowOn ? null : spawnTripwireGlow(surfaceB.x, surfaceB.y, surfaceB.z, -nx, -ny, -nz, `ttt_tripwire_glow_b_${slot}`);
 
   // The C# emitted the wire's whole audible life from its `prop_dynamic`, so prefer the prop and
   // fall back to the beam. Only positional emits — an entity-less `Sound.emit` is a global 2D
@@ -718,6 +812,8 @@ export function placeTripwire(slot: number): boolean {
     beam,
     propA,
     propB,
+    glowA,
+    glowB,
     ax: start.x, ay: start.y, az: start.z,
     bx: end.x, by: end.y, bz: end.z,
     arming: n("sm_ttt_shop_tripwire_initiation_time"),
@@ -758,6 +854,8 @@ function tickTripwires(dt: number): void {
       tw.beam?.remove();
       tw.propA?.remove();
       tw.propB?.remove();
+      tw.glowA?.remove();
+      tw.glowB?.remove();
       tripwires.splice(i, 1);
       continue;
     }
@@ -843,7 +941,7 @@ function detonateTripwire(tw: Tripwire): void {
       // .WithWeapon("[Tripwire]")`. The death itself is already carried by the engine's own
       // `player_death` (the slay inside `setHealth`), which reports no attacker — this hands that
       // event the killer and the cause it has no way to know, rather than emitting a second one.
-      markGadgetKill(slot, owner, "[Tripwire]");
+      killWithGadget(slot, owner, "[Tripwire]");
     } else {
       // C# dispatches a real PlayerDamagedEvent with instance.owner as the attacker, which is what
       // puts the trap's owner on karma's first-damage record. Fresh payload, NOT the exported
@@ -994,7 +1092,7 @@ function tickPoison(dt: number): void {
     // body outright), which is the fourth argument.
     if (next <= 0) {
       const smoke = poisonFromSmoke[slot] === 1;
-      markGadgetKill(slot, poisonSource[slot]!, smoke ? "[Poison Smoke]" : "[Poison Shots]", smoke);
+      killWithGadget(slot, poisonSource[slot]!, smoke ? "[Poison Smoke]" : "[Poison Shots]", smoke);
     }
     setHealth(slot, next);
   }
@@ -1189,6 +1287,8 @@ export function resetEffects(): void {
     tw.beam?.remove();
     tw.propA?.remove();
     tw.propB?.remove();
+    tw.glowA?.remove();
+    tw.glowB?.remove();
   }
   tripwires.length = 0;
 }

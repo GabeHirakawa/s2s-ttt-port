@@ -55,7 +55,7 @@ import { logPurchase, logRoleAssigned } from "./game/logger";
 import { clearReservedRoles, roleName } from "./game/roles";
 
 import {
-  installMatchStats, invalidatePawnCache, onDamage, onDeathPre, onPlayerHurt, onSpawn,
+  installMatchStats, invalidatePawnCache, onDamage, onDeathPre, onPlayerHurt, onSpawn, setDeathBus,
 } from "./cs2/combat";
 import { clearBodies, precacheBodyModels } from "./cs2/bodies";
 import { initInteract, resetInteract, tickInteract } from "./cs2/interact";
@@ -83,7 +83,7 @@ import { installEconomy, tickEconomy } from "./shop/economy";
 import { installSpecialRounds, tickSpecialRounds } from "./special/rounds";
 import {
   installWeaponFx, onHeDetonate, onSmokeDetonate, onSmokeExpired, onWeaponFire, resetWeaponFx,
-  tickWeaponFx,
+  tickWeaponFx, tickDnaTracker,
 } from "./shop/weaponfx";
 
 import { resetHud, tickHud } from "./cs2/hud";
@@ -250,6 +250,9 @@ export default plugin((ctx) => {
   ctx.clients.onSay((slot, text): HookResultValue | void => handleChat(slot, text));
 
   // ── game events ───────────────────────────────────────────────────────────
+  // Seed the gadget-kill path with the bus up front: it drives deaths that no engine event announces
+  // (see `killWithGadget`), so it cannot wait for the first `player_death` to supply one.
+  setDeathBus(bus);
   ctx.events.onPre("player_death", (ev) => onDeathPre(bus, ev));
 
   ctx.events.on("player_spawn", (ev) => {
@@ -405,6 +408,9 @@ export default plugin((ctx) => {
 
     tickInteract(dt);
     tickEffects(dt);
+    // AFTER the compass (both write the one centre-screen slot) and BEFORE the drain: a live DNA
+    // lead is the more urgent of the two, so it wins the screen while it lasts.
+    tickDnaTracker(dt);
     // The centre-screen HUD event paints for ONE frame, so every live line is re-fired here. What
     // each player should be seeing is set on slower cadences (the compass strip, the look-at name).
     tickHud();

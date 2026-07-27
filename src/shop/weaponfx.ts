@@ -30,8 +30,9 @@ import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, teamOf, tell } from "../cs2/pawn";
+import { hudLine, HUD_FONT_BIG, HUD_FONT_MID, HUD_FONT_SMALL, setCenterHud } from "../cs2/hud";
 import { Engine } from "@s2script/sdk/unsafe";
-import { markGadgetKill } from "../cs2/combat";
+import { killWithGadget } from "../cs2/combat";
 import { PISTOLS } from "../cs2/inventory";
 import type { Body } from "../cs2/bodies";
 import { ownsDnaScanner } from "./effects";
@@ -243,6 +244,7 @@ export function resetWeaponFx(): void {
   poisonSmoke.fill(0);
   clusterCharge.fill(0);
   lastDnaRead.clear();
+  resetDnaTracking();
   clouds.length = 0;
   destroyLiveFragments();
 }
@@ -316,7 +318,166 @@ export function readDna(slot: number, body: Body): void {
     );
     return;
   }
-  tell(slot, msgFor(slot, "SHOP_ITEM_DNA_SCANNED", roleColour, body.ownerName, body.killerName));
+  // The killer is NOT named here. The scan yields a trace; identifying whoever left it is the work,
+  // and handing over the name for free is what made the item trivialise the round.
+  tell(slot, msgFor(slot, "SHOP_ITEM_DNA_TRACE", roleColour, body.ownerName));
+  dnaTarget[slot] = body.killer;
+  dnaExpiry[slot] = body.timeOfDeath + n("sm_ttt_shop_dna_decay_time");
+  dnaProgress[slot] = 0;
+  dnaIdentified[slot] = 0;
+}
+
+// ── DNA tracking ─────────────────────────────────────────────────────────────
+/**
+ * A live DNA lead: who left the trace, when it goes cold, and how close the Detective is to putting
+ * a name to them.
+ *
+ * The scan no longer names the killer. It hands over a trace, and the Detective earns the name by
+ * getting EYES on the person — line of sight, inside a range, held long enough. That keeps the item
+ * an investigation aid rather than an instant answer.
+ *
+ * Deliberately NOT an entity. A beam or a through-wall glow needs a networked entity carrying a
+ * per-viewer transmit rule, which is the outstanding suspect for the client-side network fatals; all
+ * of this is per-client HUD events and traces, and adds nothing to the snapshot.
+ */
+const dnaTarget = new Int32Array(MAX_SLOTS).fill(-1);
+const dnaExpiry = new Float32Array(MAX_SLOTS);
+/** Seconds of clean line of sight accumulated on the target. */
+const dnaProgress = new Float32Array(MAX_SLOTS);
+/** 1 once the name has been revealed — the lead stops progressing and just tracks. */
+const dnaIdentified = new Uint8Array(MAX_SLOTS);
+/** Server time the lock happened, so the banner can hold briefly before the readout takes over. */
+const dnaLockedAt = new Float32Array(MAX_SLOTS);
+
+/** How close the Detective must be for the trace to make progress. */
+const DNA_ID_RANGE = 900;
+/** Seconds of unbroken line of sight needed to put a name to the trace. */
+const DNA_ID_SECONDS = 4;
+/** Seconds the "identified" banner holds the screen before settling into the tracking readout. */
+const DNA_LOCK_BANNER = 3;
+/** Cue for the moment a trace resolves to a person. */
+const SND_DNA_LOCK = "c4.disarmfinish";
+/** Arrow glyphs, hard left to hard right. */
+const DNA_ARROWS = ["<<", "<", "^", ">", ">>"];
+
+/** Clear every live DNA lead (round boundary). */
+export function resetDnaTracking(): void {
+  dnaTarget.fill(-1);
+  dnaExpiry.fill(0);
+  dnaProgress.fill(0);
+  dnaIdentified.fill(0);
+  dnaLockedAt.fill(0);
+}
+
+/**
+ * Advance every Detective's DNA lead and paint their readout.
+ *
+ * Driven from the shared frame handler, before the HUD drain. One comparison per slot while nobody is
+ * tracking, which is most of a round.
+ */
+export function tickDnaTracker(dt: number): void {
+  const now = Server.gameTime;
+  for (let slot = 0; slot < MAX_SLOTS; slot++) {
+    const target = dnaTarget[slot]!;
+    if (target < 0) continue;
+
+    const left = dnaExpiry[slot]! - now;
+    // Expired, target dead, or the scanner died: the lead is over and the HUD line goes with it.
+    if (left <= 0 || !reg.isAlive(slot) || !reg.isAlive(target)) {
+      dnaTarget[slot] = -1;
+      setCenterHud(slot, "");
+      continue;
+    }
+
+    const me = pawnOf(slot);
+    const them = pawnOf(target);
+    const o = me === null ? null : me.origin;
+    const ang = me === null ? null : me.eyeAngles;
+    const to = them === null ? null : them.origin;
+    if (o === null || ang === null || to === null) continue;
+
+    const dx = to.x - o.x;
+    const dy = to.y - o.y;
+    const dz = to.z - o.z;
+    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+    // Progress needs them close AND actually visible. World geometry only, so a team-mate walking
+    // through the sightline does not reset the read; a wall does. FAIL-CLOSED: a trace that starts
+    // in solid tells us nothing and counts as blocked.
+    let visible = false;
+    if (dist <= DNA_ID_RANGE) {
+      const eye = new Vector(o.x, o.y, o.z + 64);
+      const chest = new Vector(to.x, to.y, to.z + 48);
+      const los = Trace.line(eye, chest, { mask: TraceMask.WorldOnly });
+      visible = !los.didHit && !los.startSolid;
+    }
+
+    if (dnaIdentified[slot] === 0) {
+      // Losing sight DECAYS progress rather than resetting it: a target ducking behind cover for a
+      // moment should cost you, not send you back to the start.
+      dnaProgress[slot] = Math.max(0, dnaProgress[slot]! + (visible ? dt : -dt * 0.5));
+      if (dnaProgress[slot]! >= DNA_ID_SECONDS) {
+        dnaIdentified[slot] = 1;
+        dnaLockedAt[slot] = now;
+        // The lock is the payoff, so it is announced three ways: chat (permanent record), a banner
+        // that owns the screen for a moment, and a cue — a Detective mid-chase is not reading chat.
+        tell(slot, msgFor(slot, "DNA_TRACK_IDENTIFIED", reg.nameOf(target)));
+        Sound.emit(SND_DNA_LOCK, { recipients: [slot] });
+      }
+    }
+
+    // Signed bearing, -180..180. POSITIVE is to the LEFT: Source yaw increases counter-clockwise, so
+    // a target at +90 relative is off the player's left shoulder. Getting this backwards is what made
+    // the arrows point the wrong way.
+    const deg = 180 / Math.PI;
+    let bearing = Math.atan2(dy, dx) * deg - ang.y;
+    bearing = ((((bearing + 180) % 360) + 360) % 360) - 180;
+    const arrow =
+      bearing > 60 ? DNA_ARROWS[0]
+      : bearing > 15 ? DNA_ARROWS[1]
+      : bearing >= -15 ? DNA_ARROWS[2]
+      : bearing >= -60 ? DNA_ARROWS[3]
+      : DNA_ARROWS[4];
+
+    const secs = Math.ceil(left);
+    const clockColour = secs <= 10 ? "#ff6666" : "#cccccc";
+
+    // The bearing and range are shown THROUGHOUT, not just after the lock. Without a through-wall
+    // glow they are the only thing helping a Detective close the gap, and they are needed most while
+    // the killer is still a stranger — showing them only after identification had it backwards.
+    const range = `${arrow!}  ${String(Math.round(dist / 12))}m`;
+
+    if (dnaIdentified[slot] === 1) {
+      // Hold the reveal on screen briefly, then settle into the ongoing readout.
+      const banner = now - dnaLockedAt[slot]! < DNA_LOCK_BANNER;
+      setCenterHud(
+        slot,
+        banner
+          ? hudLine(msgFor(slot, "DNA_TRACK_IDENTIFIED", reg.nameOf(target)), "#66ff88", HUD_FONT_BIG) +
+              `<br>${hudLine(range, "#aaaaaa", HUD_FONT_MID)}`
+          : hudLine(`${range}  ${reg.nameOf(target)}`, "#66ccff", HUD_FONT_BIG) +
+              `<br>${hudLine(`${String(secs)}s`, clockColour, HUD_FONT_SMALL)}`,
+      );
+      continue;
+    }
+
+    // Un-identified: how the read is going and which way to go, never who it is. The stage text is
+    // the feedback loop — it tells the Detective that closing in and holding sight is what advances
+    // it, rather than leaving them to guess why nothing is happening.
+    const frac = dnaProgress[slot]! / DNA_ID_SECONDS;
+    const stage =
+      !visible ? msgFor(slot, "DNA_TRACK_SEARCHING")
+      : frac < 0.4 ? msgFor(slot, "DNA_TRACK_ATTEMPTING")
+      : frac < 0.75 ? msgFor(slot, "DNA_TRACK_ALMOST")
+      : msgFor(slot, "DNA_TRACK_IDENTIFYING");
+    setCenterHud(
+      slot,
+      hudLine(range, visible ? "#ffcc00" : "#888888", HUD_FONT_BIG) +
+        `<br>${hudLine(stage, visible ? "#ffcc00" : "#888888", HUD_FONT_MID)}` +
+        `<br>${hudLine(`${String(Math.round(frac * 100))}%`, "#aaaaaa", HUD_FONT_SMALL)}` +
+        ` ${hudLine(`${String(secs)}s`, clockColour, HUD_FONT_SMALL)}`,
+    );
+  }
 }
 
 // ── grenades ─────────────────────────────────────────────────────────────────
@@ -508,8 +669,7 @@ function tickClouds(dt: number): void {
         // the corpse of anyone in `killedWithPoison`, so a smoke victim leaves nothing to find,
         // identify or scan. The thrower is recorded here rather than when the cloud popped, because
         // the C# adds to `killedWithPoison` on the killing tick, not on entry to the cloud.
-        markGadgetKill(slot, cl.owner, "[Poison Smoke]", true);
-        setHealth(slot, 0);
+        killWithGadget(slot, cl.owner, "[Poison Smoke]", true);
         continue;
       }
       setHealth(slot, hp - perTick);
