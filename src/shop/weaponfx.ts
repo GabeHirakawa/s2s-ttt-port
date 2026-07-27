@@ -17,7 +17,7 @@
 import { UserMessages, type UserMessageView } from "@s2script/sdk/usermessages";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { Server } from "@s2script/sdk/server";
-import { createEntity } from "@s2script/sdk/entity";
+import type { EntityRef } from "@s2script/sdk/entity";
 import { after } from "@s2script/sdk/timers";
 import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
 import { Vector } from "@s2script/sdk/math";
@@ -244,6 +244,7 @@ export function resetWeaponFx(): void {
   clusterCharge.fill(0);
   lastDnaRead.clear();
   clouds.length = 0;
+  destroyLiveFragments();
 }
 
 /** Register the event-driven item behaviours. */
@@ -360,32 +361,23 @@ export function onSmokeExpired(entityId: number): void {
 }
 
 /**
- * An HE grenade detonated. If the thrower armed a Cluster Grenade, scatter its fragments around the
- * epicentre and leave them to cook off on their own fuse.
+ * An HE grenade detonated. If the thrower armed a Cluster Grenade, scatter real HE projectiles around
+ * the epicentre in a ring and let the engine fly, bounce, explode and score them — the same thing the
+ * C# `ClusterGrenadeListener` did.
  *
- * The C# spawned `config.GrenadeCount` real `CHEGrenadeProjectile`s through a CounterStrikeSharp
- * signature helper (`GrenadeDataHelper.CreateGrenade`) with a circular velocity, and the engine flew
- * them, bounced them and exploded them.
+ * ENTITY CREATION ALONE CANNOT DO THIS, which is worth recording so it is not retried. `createEntity`
+ * is `UTIL_CreateEntityByName`, so `hegrenade_projectile` IS constructible and the result flies and
+ * bounces correctly — but nothing makes it go off. Verified live, in order: `m_flDetonateTime` (a
+ * deadline nothing checks), `m_bIsLive` (the armed flag), `m_nNextThinkTick` (the schedule — a
+ * scheduled think with no think FUNCTION assigned runs nothing), and a `Detonate` input (not
+ * accepted). Detonation is think-driven and the think function pointer is not schema state, so no
+ * field write reaches it.
  *
- * REAL PROJECTILES WERE TRIED HERE AND DO NOT WORK. `createEntity` is `UTIL_CreateEntityByName`, so
- * `hegrenade_projectile` IS constructible, and the result flies and bounces correctly -- but nothing
- * makes it go off. Writing `m_flDetonateTime` did not (a deadline nothing checks), adding
- * `m_bIsLive` did not (neither field schedules the THINK that compares them, and entity thinks
- * cannot be scheduled from JS), and firing a `Detonate` input did not (the entity does not accept
- * it -- verified live: the fragments vanished on the cleanup timer without exploding). What
- * `CHEGrenadeProjectile::Create` does that entity creation cannot is arm the grenade AND assign its
- * THINK FUNCTION. Scheduling alone is not the missing piece either: `m_nNextThinkTick` is a plain
- * writable schema field and setting it changed nothing, because a scheduled think with no think
- * function assigned runs nothing. That pointer is not schema state, so no field write can reach it --
- * this needs a shim binding for the factory, which would also restore kill credit (`m_hThrower` is
- * read-only in the schema).
- *
- * So the fragments are simulated: each is placed where a grenade thrown at that velocity would first
- * hit the floor, detonates a fuse later with a line-of-sight check, and draws its blast with a
- * throwaway `env_explosion`. That keeps the two things the item's counter-play depends on — a window
- * to run, and cover that actually works.
+ * `CHEGrenadeProjectile::Create` assigns it, along with the thrower, team and weapon id — which is
+ * why kills credit correctly here and did not when the fragments were simulated. It is declared in
+ * this plugin's own gamedata and reached through `Engine.call`, so the CS2 specifics stay in the
+ * plugin.
  */
-
 /** WEAPON_HEGRENADE — the weapon id `CHEGrenadeProjectile::Create` records on the projectile. */
 const WEAPON_ID_HEGRENADE = 44;
 
@@ -396,6 +388,28 @@ const WEAPON_ID_HEGRENADE = 44;
 const createHeGrenade = Engine.call("createHeGrenade");
 if (createHeGrenade === null) {
   console.log(`[ttt] WARN: cluster grenade unavailable — ${Engine.status("createHeGrenade")}`);
+}
+
+/**
+ * Cluster fragments still in the air, so they can be destroyed at a round boundary.
+ *
+ * A LIVE GRENADE MUST NEVER CROSS A ROUND BOUNDARY. The simulated fragments this replaced were reset
+ * here for the same reason ("fragments must never cook off into the next round"); real projectiles
+ * need it more, not less. A cluster that wins the round leaves up to eight engine-owned grenades
+ * mid-flight holding a handle to a thrower pawn that the round restart is about to destroy, and they
+ * are networked entities — a client asked to copy one whose thrower has gone can hard-error out of
+ * the game ("Copy Entity ..."), which is exactly what was seen when a cluster took the last kills and
+ * the next round began.
+ */
+const liveFragments: EntityRef[] = [];
+
+/** Destroy every fragment still in the world. */
+function destroyLiveFragments(): void {
+  for (let i = 0; i < liveFragments.length; i++) {
+    const nade = liveFragments[i]!;
+    if (nade.isValid()) nade.remove();
+  }
+  liveFragments.length = 0;
 }
 
 export function onHeDetonate(thrower: number, x: number, y: number, z: number): void {
@@ -420,7 +434,7 @@ export function onHeDetonate(thrower: number, x: number, y: number, z: number): 
   for (let i = 0; i < count; i++) {
     const a = (2 * Math.PI * i) / count;
     const velocity = { x: Math.cos(a) * throwForce, y: Math.sin(a) * throwForce, z: upForce };
-    createHeGrenade(
+    const nade = createHeGrenade(
       origin,
       zeroAngles,
       velocity,
@@ -429,6 +443,10 @@ export function onHeDetonate(thrower: number, x: number, y: number, z: number): 
       WEAPON_ID_HEGRENADE,
       team,
     );
+    // Tracked so the round boundary can destroy anything still airborne — see `liveFragments`.
+    // A detonated grenade removes itself, and `isValid()` covers that; the list is cleared each round
+    // either way, so it cannot grow without bound.
+    if (nade !== null) liveFragments.push(nade);
   }
 }
 
