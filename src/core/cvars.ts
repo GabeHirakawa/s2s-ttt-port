@@ -229,7 +229,11 @@ const SPECS: readonly Spec[] = [
   // ── misc ────────────────────────────────────────────────────────────────────
   S("sm_ttt_afk_seconds", "int", 180, "Seconds before an unmoved player is moved to spectator (0 = never)", 0, 600),
   S("sm_ttt_show_names", "bool", true, "Show the name of the player you are looking at"),
-  S("sm_ttt_strip_on_assign", "bool", false, "Strip weapons before handing out role loadouts"),
+  // ON by default, unlike the C# (`StripWeaponsPriorToEquipping = false`). The C# could afford that
+  // because its rounds ride the engine's own restart, which clears inventories; TTT rounds here begin
+  // without one, so anything held simply carried over and players accumulated weapons round on round.
+  // The knife and any pistol are kept — see `stripToSidearms`.
+  S("sm_ttt_strip_on_assign", "bool", true, "Strip primaries/utility (keep knife + pistol) before role loadouts"),
   S("sm_ttt_prop_pickup", "bool", true, "Allow players to carry props and bodies with USE"),
 ];
 

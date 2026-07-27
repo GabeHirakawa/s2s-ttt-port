@@ -138,6 +138,13 @@ export function registerCommands(commands: CtxCommands): void {
 
   const list = (cmd: CommandInvocation): void => {
     const slot = cmd.callerSlot;
+    // The shop opens with the round. Browsing during the countdown showed the catalogue before
+    // anyone had a role, which both leaks the Traitor list and invites buying into a role you have
+    // not been dealt. Console (slot < 0) still lists everything, for operators.
+    if (slot >= 0 && game.state !== GameState.InProgress) {
+      cmd.reply(msgFor(slot, "SHOP_INACTIVE"));
+      return;
+    }
     const items = slot < 0 ? (allItems() as ShopItem[]) : sortedFor(slot, listBuffer);
     const bal = slot < 0 ? Number.MAX_SAFE_INTEGER : balanceOf(slot);
 

@@ -17,7 +17,7 @@ import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { setArmor, setHealth, tell, toSpectator } from "../cs2/pawn";
-import { give, stripAll } from "../cs2/inventory";
+import { give, stripToSidearms } from "../cs2/inventory";
 import { applyRoleTeam } from "./teams";
 import { nextFrame } from "@s2script/sdk/timers";
 
@@ -179,7 +179,10 @@ function choose(pool: number[], role: RoleId): number {
 export function applyLoadout(slot: number, role: RoleId): void {
   tell(slot, msgFor(slot, "ROLE_ASSIGNED", roleNameFor(slot, role)));
 
-  if (cfg.stripOnAssign) stripAll(slot);
+  // Clear last round's arsenal before the loadout goes on, keeping the knife and any pistol — see
+  // `stripToSidearms`. Without this a player keeps everything they bought or picked up last round,
+  // so a Traitor who bought an AWP starts every subsequent round with it.
+  if (cfg.stripOnAssign) stripToSidearms(slot);
 
   const hp = cfg.roleHealth[role]!;
   if (hp > 0) setHealth(slot, hp);

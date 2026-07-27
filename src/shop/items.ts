@@ -166,6 +166,9 @@ export function registerItems(): void {
 
   register(
     item("silentawp", "SHOP_ITEM_SILENT_AWP", "SHOP_ITEM_SILENT_AWP_DESC", RoleId.Traitor, "sm_ttt_shop_silentawp_price", (slot) => {
+      // Free the primary slot first, or the engine has nowhere to put the AWP and drops it at the
+      // buyer's feet — which also means they never hold it, so its silenced-shot grant does nothing.
+      clearSlot(slot, GearSlot.Rifle);
       give(
         slot,
         "weapon_awp",

@@ -186,7 +186,47 @@ export function heldWeapons(slot: number): HeldWeapon[] {
   return pawn.weapons as HeldWeapon[];
 }
 
-/** Remove every weapon occupying `gearSlot`. */
+/**
+ * Item-definition indices that occupy the PISTOL slot. Same set the fire hook uses for its pistol
+ * test, and the reason this file can classify a held weapon at all: the class NAME is not readable
+ * (see `weaponClass`), but the definition index is a plain schema field.
+ */
+const PISTOL_DEFS: ReadonlySet<number> = new Set([1, 2, 3, 4, 30, 32, 36, 61, 63, 64]);
+/** Knife definition indices: the two default knives, plus every purchasable knife (500+). */
+const KNIFE_DEFS: ReadonlySet<number> = new Set([42, 59]);
+/** Grenades and utility. */
+const UTILITY_DEFS: ReadonlySet<number> = new Set([43, 44, 45, 46, 47, 48, 68]);
+const C4_DEF = 49;
+
+/**
+ * A held weapon's definition index, or -1.
+ *
+ * `m_iItemDefinitionIndex` sits behind two embedded structs — `m_AttributeManager.m_Item` — and is a
+ * normal schema read the whole way, unlike the class name.
+ */
+export function weaponDef(w: HeldWeapon | null | undefined): number {
+  if (w === null || w === undefined) return -1;
+  return w.attributeManager.item.itemDefinitionIndex ?? -1;
+}
+
+/** Which gear slot a definition index occupies. The by-index counterpart of {@link slotOf}. */
+export function slotOfDef(def: number): GearSlot {
+  if (def < 0) return GearSlot.Rifle;
+  if (PISTOL_DEFS.has(def)) return GearSlot.Pistol;
+  if (KNIFE_DEFS.has(def) || def >= 500) return GearSlot.Knife;
+  if (def === C4_DEF) return GearSlot.C4;
+  if (UTILITY_DEFS.has(def)) return GearSlot.Utility;
+  return GearSlot.Rifle;
+}
+
+/**
+ * Remove every weapon occupying `gearSlot`.
+ *
+ * Classifies by DEFINITION INDEX, not class name. It used to go through `weaponClass`, which returns
+ * "" on this runtime because neither `className` nor `designerName` is readable off a weapon — so the
+ * loop matched nothing and cleared nothing. That is why a purchased gun landed on the FLOOR: the slot
+ * was still occupied, so the engine had nowhere to put the new weapon.
+ */
 export function clearSlot(slot: number, gearSlot: GearSlot): number {
   const pawn = pawnOf(slot);
   if (pawn === null || !pawn.isValid) return 0;
@@ -194,8 +234,7 @@ export function clearSlot(slot: number, gearSlot: GearSlot): number {
   const held = pawn.weapons as HeldWeapon[];
   for (let i = 0; i < held.length; i++) {
     const w = held[i]!;
-    const cls = weaponClass(w);
-    if (cls !== "" && slotOf(cls) === gearSlot && pawn.removeWeapon(w)) removed++;
+    if (slotOfDef(weaponDef(w)) === gearSlot && pawn.removeWeapon(w)) removed++;
   }
   return removed;
 }
@@ -203,6 +242,33 @@ export function clearSlot(slot: number, gearSlot: GearSlot): number {
 /** Strip every held weapon. */
 export function stripAll(slot: number): void {
   pawnOf(slot)?.stripWeapons();
+}
+
+/**
+ * Strip the primary weapon and utility, keeping the KNIFE and any PISTOL.
+ *
+ * What a round reset actually wants. A blanket `stripAll` leaves a player with no melee at all, and
+ * the stock Innocent and Traitor loadouts are empty, so it would spawn most of the server unable to
+ * do anything. Keeping a sidearm as well means a round starts the way TTT expects — knife and pistol,
+ * everything heavier earned or bought during the round — so what carries over is the rifle someone
+ * bought last round, which is the thing that actually unbalances the next one.
+ *
+ * Grenades and the C4 go: a stockpiled utility slot carries over just as unfairly as a rifle.
+ *
+ * Only possible because weapons are classified by definition index — `weaponClass` returns "" here.
+ */
+export function stripToSidearms(slot: number): number {
+  const pawn = pawnOf(slot);
+  if (pawn === null || !pawn.isValid) return 0;
+  let removed = 0;
+  const held = pawn.weapons as HeldWeapon[];
+  for (let i = 0; i < held.length; i++) {
+    const w = held[i]!;
+    const gear = slotOfDef(weaponDef(w));
+    if (gear === GearSlot.Knife || gear === GearSlot.Pistol) continue;
+    if (pawn.removeWeapon(w)) removed++;
+  }
+  return removed;
 }
 
 /** Does this player hold a weapon of `className`? */

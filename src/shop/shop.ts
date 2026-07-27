@@ -218,7 +218,12 @@ export function sortedFor(slot: number, out: ShopItem[]): ShopItem[] {
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
     // Hide items this player's role can never buy, matching the C# list filter.
-    if (item.role !== RoleId.None && reg.roleOf(slot) !== item.role && inProgress()) continue;
+    //
+    // The role test used to be suppressed outside a live round (`&& inProgress()`), which meant the
+    // listing showed the WHOLE catalogue — Traitor items included — to everyone during the countdown,
+    // before any role had been dealt. Filtering unconditionally means a player with no role yet sees
+    // only the role-agnostic items, which is the honest answer to "what can I buy right now".
+    if (item.role !== RoleId.None && reg.roleOf(slot) !== item.role) continue;
     out.push(item);
   }
 
