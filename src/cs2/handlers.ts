@@ -13,8 +13,10 @@ import { Voice } from "@s2script/sdk/voice";
 import { Entity } from "@s2script/sdk/entity";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { UserMessages } from "@s2script/sdk/usermessages";
-import { HintText, Player } from "@s2script/cs2";
-import { TraceMask } from "@s2script/sdk/trace";
+import { Player } from "@s2script/cs2";
+import { Trace, TraceMask } from "@s2script/sdk/trace";
+import { Vector } from "@s2script/sdk/math";
+import { hudLine, HUD_FONT_BIG, setCenterHud } from "./hud";
 import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
 import { cfg } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
@@ -255,43 +257,87 @@ function clearVoiceRules(): void {
 /**
  * Show the name of whoever the player is looking at.
  *
- * The C# ran this at 4 Hz for every player with a full eye-position ray each time and no gating on
- * whether the viewer was even alive. Same cadence here, but dead players and camouflaged targets are
- * skipped, and the hint is only re-sent when the target changes.
+ * Three things this does differently from the ray it replaced:
+ *
+ *  - **Angular tolerance, not a hitbox hit.** The old version required `aimTrace` to land on a pawn's
+ *    hitbox, so the name only appeared with the crosshair dead on a body and vanished on any small
+ *    movement. This picks whichever player is CLOSEST TO THE CROSSHAIR inside a cone, which is how the
+ *    name stays up while tracking someone.
+ *  - **Line of sight is checked explicitly.** A cone test alone would name people through walls. Every
+ *    candidate is confirmed with a WorldOnly trace to their chest, and FAILS CLOSED — a trace that
+ *    starts in solid tells us nothing and is treated as blocked.
+ *  - **It is re-sent every frame** (via the HUD module), because the centre-screen event paints for a
+ *    single frame. The old code sent once on change through `HintText`, which displayed nothing at all.
+ *
+ * The 4 Hz search cadence is kept from the C#; only the re-send is per-frame.
  */
 const lastNameTarget = new Int32Array(MAX_SLOTS).fill(-1);
+
+/** Half-angle of the "looking at" cone, as its cosine. ~8 degrees. */
+const NAME_CONE_COS = 0.99;
+/** How far away a name can be read. */
+const NAME_MAX_DIST = 1024;
+/** Chest offset above a pawn's origin — what the LOS trace aims at. */
+const NAME_CHEST_Z = 48;
 
 function updateNames(): void {
   if (!cfg.showNames) return;
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
-    if (!reg.isAlive(slot)) continue;
+    if (!reg.isAlive(slot)) {
+      setCenterHud(slot, "");
+      lastNameTarget[slot] = -1;
+      continue;
+    }
     const pawn = pawnOf(slot);
     if (pawn === null) continue;
+    const o = pawn.origin;
+    const ang = pawn.eyeAngles;
+    if (o === null || ang === null) continue;
 
-    const hit = pawn.aimTrace({ distance: 1024, mask: TraceMask.ShotHitbox });
-    let target = -1;
-    if (hit !== null && hit.didHit && hit.entity !== null) {
-      const idx = hit.entity.index;
-      const others = reg.activeSlots();
-      for (let j = 0; j < others.length; j++) {
-        const other = others[j]!;
-        if (other === slot) continue;
-        const otherPawn = pawnOf(other);
-        if (otherPawn !== null && otherPawn.ref.index === idx) {
-          target = other;
-          break;
-        }
-      }
+    // Eye position and forward vector. `eyeAngles`, not body angles: this follows where they AIM.
+    const rad = Math.PI / 180;
+    const cp = Math.cos(ang.x * rad);
+    const fx = cp * Math.cos(ang.y * rad);
+    const fy = cp * Math.sin(ang.y * rad);
+    const fz = -Math.sin(ang.x * rad);
+    const eye = new Vector(o.x, o.y, o.z + 64);
+
+    let best = -1;
+    let bestDot = NAME_CONE_COS;
+    for (let j = 0; j < active.length; j++) {
+      const other = active[j]!;
+      if (other === slot || !reg.isAlive(other)) continue;
+      const op = pawnOf(other);
+      const oo = op === null ? null : op.origin;
+      if (oo === null) continue;
+
+      const dx = oo.x - eye.x;
+      const dy = oo.y - eye.y;
+      const dz = oo.z + NAME_CHEST_Z - eye.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      if (dist < 1 || dist > NAME_MAX_DIST) continue;
+
+      // How centred they are in the view — 1 is dead on the crosshair.
+      const dot = (dx * fx + dy * fy + dz * fz) / dist;
+      if (dot <= bestDot) continue;
+
+      // World geometry only: a teammate standing in front does not hide the name, a wall does.
+      const los = Trace.line(eye, new Vector(oo.x, oo.y, oo.z + NAME_CHEST_Z), {
+        mask: TraceMask.WorldOnly,
+      });
+      if (los.didHit || los.startSolid) continue;
+
+      bestDot = dot;
+      best = other;
     }
 
     // Camouflage: a camouflaged player never surfaces through the name display.
-    if (target >= 0 && isCamouflaged(target)) target = -1;
+    if (best >= 0 && isCamouflaged(best)) best = -1;
 
-    if (target === lastNameTarget[slot]) continue;
-    lastNameTarget[slot] = target;
-    if (target >= 0) HintText.to(slot, reg.nameOf(target));
+    lastNameTarget[slot] = best;
+    setCenterHud(slot, best < 0 ? "" : hudLine(reg.nameOf(best), "#ffffff", HUD_FONT_BIG));
   }
 }
 

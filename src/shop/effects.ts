@@ -20,9 +20,8 @@ import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import { Vector } from "@s2script/sdk/math";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
-import { Beam, Fade, HintText, Player, type BeamHandle } from "@s2script/cs2";
-// `fireToClient` is on the SDK Events, not the cs2 re-export.
-import { Events as SdkEvents } from "@s2script/sdk/events";
+import { Beam, Fade, type BeamHandle } from "@s2script/cs2";
+import { hudLine, HUD_FONT_BIG, HUD_FONT_SMALL, setCenterHud } from "../cs2/hud";
 import { Server } from "@s2script/sdk/server";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { b, n, s } from "../core/cvars";
@@ -898,9 +897,14 @@ export function tryDefuseTripwire(slot: number, dt: number): boolean {
       oneSlot[0] = slot;
       pawn.emitSound(SND_DEFUSE_TICK, { recipients: oneSlot });
     }
-    HintText.to(
+    // Same centre-screen route as the compass; the per-frame drain keeps it on screen for as long as
+    // the defuse is held, and it clears itself the moment this stops being set.
+    setCenterHud(
       slot,
-      msg("SHOP_ITEM_TRIPWIRE_DEFUSING", reg.nameOf(slot), Math.ceil(total - tw.defuseProgress)),
+      hudLine(
+        msg("SHOP_ITEM_TRIPWIRE_DEFUSING", reg.nameOf(slot), Math.ceil(total - tw.defuseProgress)),
+        "#ffdd55",
+      ),
     );
     return true;
   }
@@ -999,36 +1003,6 @@ function tickPoison(dt: number): void {
 // ── compass ──────────────────────────────────────────────────────────────────
 let compassAccum = 0;
 
-/**
- * The last strip rendered for each slot, and the frame-driven re-send.
- *
- * `show_survival_respawn_status` is painted by CS2 for a SINGLE FRAME, so a HUD built on it has to be
- * re-fired every frame or it never appears. The strip itself is only recomputed on the 0.25s cadence
- * below — recomputing per frame would run the target search 64 times more often for no visible gain.
- */
-const compassText: string[] = new Array<string>(MAX_SLOTS).fill("");
-
-/**
- * Re-send every live compass strip. Called from the plugin's per-frame handler.
- *
- * The centre-screen route is a GAME EVENT fired to one client, not a user message. `HintText.to`
- * (CUserMessageTextMsg) was used here and displayed nothing: its `param` field is REPEATED, and the
- * message builder's scalar `setString` silently no-opped on it, so a message with no text at all went
- * out and `send()` still reported success because delivery had happened.
- */
-export function tickCompassHud(): void {
-  for (let slot = 0; slot < MAX_SLOTS; slot++) {
-    const text = compassText[slot]!;
-    if (text === "") continue;
-    const p = Player.fromSlot(slot);
-    if (p === null) continue;
-    SdkEvents.fireToClient(slot, "show_survival_respawn_status", {
-      loc_token: text,
-      duration: 1,
-      userid: p.userId,
-    });
-  }
-}
 
 /** Filler cell — the C# `TextCompass` default. */
 const COMPASS_FILLER = "·";
@@ -1060,7 +1034,7 @@ function tickCompass(dt: number): void {
     const slot = active[i]!;
     const mode = compass[slot]! as CompassMode;
     if (mode === CompassMode.Off || !reg.isAlive(slot)) {
-      compassText[slot] = "";
+      setCenterHud(slot, "");
       continue;
     }
 
@@ -1105,7 +1079,7 @@ function tickCompass(dt: number): void {
       }
     }
     if (!found) {
-      compassText[slot] = "";
+      setCenterHud(slot, "");
       continue;
     }
 
@@ -1124,9 +1098,11 @@ function tickCompass(dt: number): void {
     place(compassBuf, fov, start, targetYaw, "X");
 
     // Monospace so the strip's cells line up; the glyphs are meaningless if they drift.
-    compassText[slot] =
-      `<font class='fontSize-m' color='#ffcc00'>${compassBuf.join("")}</font>` +
-      `<br><font class='fontSize-s' color='#cccccc'>${distanceBand(Math.sqrt(bestSq))}</font>`;
+    setCenterHud(
+      slot,
+      hudLine(compassBuf.join(""), "#ffcc00", HUD_FONT_BIG) +
+        `<br>${hudLine(distanceBand(Math.sqrt(bestSq)), "#cccccc", HUD_FONT_SMALL)}`,
+    );
   }
 }
 

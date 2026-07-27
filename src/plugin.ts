@@ -78,7 +78,6 @@ import {
   releaseC4,
   resetEffects,
   tickEffects,
-  tickCompassHud,
 } from "./shop/effects";
 import { installEconomy, tickEconomy } from "./shop/economy";
 import { installSpecialRounds, tickSpecialRounds } from "./special/rounds";
@@ -87,6 +86,7 @@ import {
   tickWeaponFx,
 } from "./shop/weaponfx";
 
+import { resetHud, tickHud } from "./cs2/hud";
 import { registerCommands } from "./commands";
 
 /**
@@ -373,6 +373,8 @@ export default plugin((ctx) => {
     resetEffects();
     resetSpoof();
     resetWeaponFx();
+    // A compass strip or a look-at name from last round must not stay pinned to anyone's screen.
+    resetHud();
     refresh();
     refreshItems();
     applyServerSettings();
@@ -403,9 +405,9 @@ export default plugin((ctx) => {
 
     tickInteract(dt);
     tickEffects(dt);
-    // The compass HUD event paints for ONE frame, so it is re-fired every frame; the strip itself
-    // is only recomputed on the slower cadence inside tickEffects.
-    tickCompassHud();
+    // The centre-screen HUD event paints for ONE frame, so every live line is re-fired here. What
+    // each player should be seeing is set on slower cadences (the compass strip, the look-at name).
+    tickHud();
     tickWeaponFx(dt);
     tickEconomy(dt);
     tickSpecialRounds();
@@ -431,6 +433,7 @@ export default plugin((ctx) => {
       resetWeaponFx();
       resetInteract();
       resetSpoof();
+      resetHud();
       // Drops the role icons and puts every tagged name back: an unload must not leave "[T] Bob".
       resetIcons();
     clearReservedRoles();
