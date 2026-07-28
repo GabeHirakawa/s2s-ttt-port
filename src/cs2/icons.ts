@@ -64,6 +64,7 @@ import type { TttEvents } from "../core/events";
 import * as reg from "../core/registry";
 import { inProgress } from "../game/game";
 import { roleName } from "../game/roles";
+import { cfg } from "../core/cvars";
 import { ROLE_COLORS, type Rgb } from "./color";
 import { pawnOf } from "./pawn";
 
@@ -285,12 +286,14 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
   // either way and the keyvalue took the blame.
   const relay = createEntity("prop_dynamic", { model, targetname: `ttt_glow_relay_${slot}` });
   if (relay === null) return false;
+  console.log(`[ttt] ENTTRACE make glow-relay slot=${String(slot)} index=${String(relay.index)}`);
 
   const glow = createEntity("prop_dynamic", { model, targetname: `ttt_glow_${slot}` });
   if (glow === null) {
     relay.remove();
     return false;
   }
+  console.log(`[ttt] ENTTRACE make glow-model slot=${String(slot)} index=${String(glow.index)}`);
 
   // `createEntity` hands back a bare EntityRef; the schema field accessors come from wrapEntity.
   // The wrapper is a view over the ref, so it stays correct as the entity changes.
@@ -320,6 +323,10 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
 
 /** Spawn both panels for `slot`. Returns false if the pawn or either panel would not resolve. */
 function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
+  // Bisect switch — see `sm_ttt_icons_enabled`. Icons (and the Traitor glow chained off them) are the
+  // only transmit-filtered entities in the mode, and transmit filtering is the standing suspect for
+  // the client-side `CopyExistingEntity` fatals.
+  if (!cfg.iconsEnabled) return false;
   const c = ROLE_COLORS[role];
   const origin = pawn.origin;
   if (c === undefined || origin === null) return false;
@@ -348,6 +355,7 @@ function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
       removeIcons(slot); // half a hat is worse than none — it reads as a different marker
       return false;
     }
+    console.log(`[ttt] ENTTRACE make icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
     icons[base + i] = ent;
   }
 
@@ -362,9 +370,24 @@ function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
 /** Destroy `slot`'s panels and drop their visibility rules. */
 function removeIcons(slot: number): void {
   const base = slot * PARTS;
-  for (let i = 0; i < PARTS; i++) {
+  // CHILDREN FIRST — walk the parts BACKWARDS.
+  //
+  // The glow model is bone-merged onto the relay (`FollowEntity`), so the relay is its parent. Ascending
+  // order destroyed the relay (part 2) before the model (part 3), leaving clients holding a child whose
+  // parent had just been deleted — which is precisely what `CopyExistingEntity: missing client entity N`
+  // reports. A Traitor kill runs this on the victim, and that is when clients were hard-crashing.
+  //
+  // The two worldtext panels are parented to the PAWN, which outlives them, so their order never
+  // mattered; only the glow pair has a parent inside this set.
+  for (let i = PARTS - 1; i >= 0; i--) {
     const ent = icons[base + i];
     if (ent === null) continue;
+    // ENTITY-INDEX TRACE. `CopyExistingEntity: missing client entity N` is the client being told to
+    // build an entity from an existing one it never received. A transmit-FILTERED entity is exactly
+    // that: hidden clients never got it. If its index is then freed and REUSED by something visible,
+    // the client is asked to copy from a ghost. Logging indices on both sides lets the number in the
+    // next crash be checked against what we destroyed just before.
+    console.log(`[ttt] ENTTRACE free icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
     // Release the rule before the entity so the native table does not carry a dead entry.
     Transmit.reset(ent);
     ent.remove();
@@ -466,6 +489,28 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
       later.ref.setModel(roleModel(role));
     });
   });
+}
+
+/**
+ * Make `ent` visible ONLY to this round's Traitors, for anything that wants the Traitor-only
+ * treatment the role icons get (a glow twin on a tripwire, say).
+ *
+ * FAIL-CLOSED, like the icons: if the rule cannot be installed the entity is destroyed rather than
+ * left visible to everyone, because a Traitor-only marker that everyone can see is worse than no
+ * marker at all.
+ *
+ * Returns false when the entity was destroyed. The viewer set is this round's Traitor list, so an
+ * entity restricted after the deal sees the complete set — the same snapshot the icons use.
+ */
+export function restrictToTraitors(ent: EntityRef): boolean {
+  if (Transmit.setVisibleTo(ent, traitors)) return true;
+  if (!warnedNoTransmit) {
+    warnedNoTransmit = true;
+    console.log("[ttt] WARN: transmit filtering unavailable — hiding Traitor-only markers instead of leaking them");
+  }
+  Transmit.reset(ent);
+  ent.remove();
+  return false;
 }
 
 /**

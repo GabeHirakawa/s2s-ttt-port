@@ -24,7 +24,7 @@ import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setArmor, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
-import { weaponClass, type HeldWeapon } from "./inventory";
+import { type HeldWeapon } from "./inventory";
 import { enforceRoundTeam, revealAsInnocent } from "../game/teams";
 import { colorBody } from "./color";
 import { unspoofAlive } from "./spoof";
@@ -32,7 +32,7 @@ import { game, inProgress, inWarmup } from "../game/game";
 import { roleName } from "../game/roles";
 import { logIdentify } from "../game/logger";
 import { isCamouflaged } from "../shop/effects";
-import { tryPurchase, itemById } from "../shop/shop";
+import { tryPurchase, itemById, PurchaseResult } from "../shop/shop";
 
 /** Seconds each player has been stationary since the round started. */
 const afkFor = new Float32Array(MAX_SLOTS);
@@ -82,8 +82,13 @@ export function resetBuyZones(): void {
 }
 
 /**
- * Remove the map's buy zones so the engine buy menu never opens. Driven from `round_start`, and
- * latched so it costs one entity scan per round and one removal pass per map.
+ * Remove the map's buy zones, as the C# `MapZoneRemover` does. Driven from `round_start`, and latched
+ * so it costs one entity scan per round and one removal pass per map.
+ *
+ * This does NOT close the buy menu, and must not: the menu is the shop's front end. Buying a weapon
+ * the shop aliases (`BUY_ALIASES`) is how a player purchases that shop item, so `mp_buy_anywhere`
+ * stays as the server has it and the menu keeps working anywhere. What stops a player buying a real
+ * weapon the shop does not sell is {@link onItemPurchase}, which strips the engine's grant.
  */
 export function removeBuyZones(): void {
   if (zonesRemoved) return;
@@ -151,12 +156,26 @@ export function onItemPurchase(slot: number, weapon: string): boolean {
   // grant and destroyed the shop weapon too — replicating that leaves an M4A1 buyer with no rifle.
   const pawn = pawnOf(slot);
   if (pawn !== null && pawn.isValid) {
-    const held = pawn.weapons as HeldWeapon[];
-    for (let i = 0; i < held.length; i++) {
-      const w = held[i]!;
-      if (weaponClass(w) === weapon) {
-        pawn.removeWeapon(w);
-        break;
+    // Identify the granted weapon by ENTITY IDENTITY, not by class name.
+    //
+    // This compared `weaponClass(w) === weapon`, and `weaponClass` returns "" on this runtime because
+    // neither `className` nor `designerName` is readable off a weapon. So the strip never matched
+    // anything: the engine's grant survived, and the buy menu kept handing out free real weapons on
+    // top of the TTT loadout — the exact failure this function exists to prevent.
+    //
+    // `Entity.findByClass` resolves the designer name ENGINE-side, so intersecting its result with
+    // the pawn's held weapons identifies the right entity without ever reading a class name in JS.
+    const ofClass = Entity.findByClass(weapon);
+    if (ofClass.length > 0) {
+      const indices = new Set<number>();
+      for (let i = 0; i < ofClass.length; i++) indices.add(ofClass[i]!.index);
+      const held = pawn.weapons as HeldWeapon[];
+      for (let i = 0; i < held.length; i++) {
+        const w = held[i]!;
+        if (indices.has(w.ref.index)) {
+          pawn.removeWeapon(w);
+          break;
+        }
       }
     }
   }
@@ -176,7 +195,22 @@ export function onItemPurchase(slot: number, weapon: string): boolean {
   if (itemId === undefined) return false;
   const item = itemById(itemId);
   if (item === undefined) return false;
-  tryPurchase(slot, item);
+
+  // Confirm the purchase, exactly as `sm_buy` does.
+  //
+  // The C# does not call the shop directly here — it builds a `css_shop buy <alias>` invocation and
+  // runs it through the command manager, so a buy-menu purchase produces the same output as typing
+  // the command. Calling `tryPurchase` straight was silent on SUCCESS: the weapon appeared with no
+  // confirmation and no indication that credits had been spent, while a FAILURE still explained
+  // itself (tryPurchase reports insufficient funds, wrong role and limits itself). That asymmetry is
+  // what made buying through the menu feel broken even when it worked.
+  if (tryPurchase(slot, item) === PurchaseResult.Success) {
+    tell(slot, msgFor(slot, "SHOP_PURCHASED", msgFor(slot, item.nameKey)));
+    const desc = msg(item.descKey);
+    if (desc !== "" && desc !== item.descKey) {
+      tell(slot, msgFor(slot, "SHOP_PURCHASED_DETAIL", desc));
+    }
+  }
   return true;
 }
 
@@ -273,8 +307,16 @@ function clearVoiceRules(): void {
  */
 const lastNameTarget = new Int32Array(MAX_SLOTS).fill(-1);
 
-/** Half-angle of the "looking at" cone, as its cosine. ~8 degrees. */
-const NAME_CONE_COS = 0.99;
+/**
+ * How far off the aim ray a player may be, in WORLD UNITS, to count as "looked at".
+ *
+ * A fixed ANGLE was tried first and is the wrong shape: an 8-degree cone spans ~4 units across at
+ * 30 units and ~70 at 500, so at any real distance it swallowed whoever was standing beside the
+ * target. A lateral distance is the same width everywhere. 40 is a little wider than a player
+ * (~32 units across), so aiming at someone's edge still names them and their neighbour does not
+ * qualify unless genuinely overlapping.
+ */
+const NAME_LATERAL = 40;
 /** How far away a name can be read. */
 const NAME_MAX_DIST = 1024;
 /** Chest offset above a pawn's origin — what the LOS trace aims at. */
@@ -304,8 +346,17 @@ function updateNames(): void {
     const fz = -Math.sin(ang.x * rad);
     const eye = new Vector(o.x, o.y, o.z + 64);
 
+    // NEAREST along the aim ray, among those close enough to it.
+    //
+    // Two failure modes this avoids. Picking whoever is most CENTRED names the person standing behind
+    // your target, because someone further away is easily closer to the crosshair. Picking whoever is
+    // simply NEAREST names the team-mate beside them. Selecting on distance ALONG the ray, gated by
+    // distance FROM the ray, answers the actual question.
+    //
+    // The occlusion trace cannot help here: it is WorldOnly, so a player never blocks another
+    // player's name (deliberately — a team-mate crossing your view should not blank the readout).
     let best = -1;
-    let bestDot = NAME_CONE_COS;
+    let bestAlong = Infinity;
     for (let j = 0; j < active.length; j++) {
       const other = active[j]!;
       if (other === slot || !reg.isAlive(other)) continue;
@@ -316,12 +367,14 @@ function updateNames(): void {
       const dx = oo.x - eye.x;
       const dy = oo.y - eye.y;
       const dz = oo.z + NAME_CHEST_Z - eye.z;
-      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dist < 1 || dist > NAME_MAX_DIST) continue;
+      // How far along the aim ray they are. Behind the viewer (<= 0) is never "looked at".
+      const along = dx * fx + dy * fy + dz * fz;
+      if (along <= 1 || along > NAME_MAX_DIST) continue;
+      if (along >= bestAlong) continue;   // something nearer already qualified
 
-      // How centred they are in the view — 1 is dead on the crosshair.
-      const dot = (dx * fx + dy * fy + dz * fz) / dist;
-      if (dot <= bestDot) continue;
+      // Perpendicular distance from the ray: |v|^2 - along^2, compared squared to avoid the sqrt.
+      const lateralSq = dx * dx + dy * dy + dz * dz - along * along;
+      if (lateralSq > NAME_LATERAL * NAME_LATERAL) continue;
 
       // World geometry only: a teammate standing in front does not hide the name, a wall does.
       const los = Trace.line(eye, new Vector(oo.x, oo.y, oo.z + NAME_CHEST_Z), {
@@ -329,7 +382,7 @@ function updateNames(): void {
       });
       if (los.didHit || los.startSolid) continue;
 
-      bestDot = dot;
+      bestAlong = along;
       best = other;
     }
 

@@ -222,6 +222,15 @@ const SPECS: readonly Spec[] = [
   // instead of shipping another guess.
   S("sm_ttt_icons_enabled", "bool", true, "Role icons above heads (transmit-filtered). Off = bisect"),
   S("sm_ttt_bodies_enabled", "bool", true, "Corpses on death. Off = bisect"),
+  // Corpse-path bisect. Disabling bodies wholesale removes THREE things at once — the ragdoll entity,
+  // the pawn alpha-hide, and the settle pass — so "bodies off = no crash" does not say which. These
+  // split them.
+  S("sm_ttt_body_hidepawn", "bool", true, "Hide the victim's pawn once the corpse exists. Off = bisect"),
+  S("sm_ttt_body_settle", "bool", true, "Settle pass (ClearParent + MoveType + teleport) on the corpse. Off = bisect"),
+  // How far back along the carrier's RIGHT vector a carried corpse's root is pulled, so the beam ends
+  // at its middle instead of an end. Live-tunable because the exact figure depends on the model and
+  // on how the held pose lands its axes — easier to dial in than to derive.
+  S("sm_ttt_carry_body_offset", "float", 36, "Carried corpse centring offset (units)", -128, 128),
   S("sm_ttt_shop_tripwire_initiation_time", "float", 2, "Seconds before a Tripwire arms", 0, 60),
   // `TripwireConfig.TripwireSizeSquared`. SQUARED units: 500 is a ~22u radius. The 10 this used to
   // default to is 3.2u, which is smaller than a player and left both the walk-through trigger and
@@ -363,6 +372,8 @@ export const cfg = {
   stripOnAssign: false,
   iconsEnabled: true,
   bodiesEnabled: true,
+  bodyHidePawn: true,
+  bodySettle: true,
   propPickup: true,
   /** Health by {@link RoleId} index. */
   roleHealth: new Int32Array(5),
@@ -394,6 +405,8 @@ function rebuild(): void {
   cfg.stripOnAssign = b("sm_ttt_strip_on_assign");
   cfg.iconsEnabled = b("sm_ttt_icons_enabled");
   cfg.bodiesEnabled = b("sm_ttt_bodies_enabled");
+  cfg.bodyHidePawn = b("sm_ttt_body_hidepawn");
+  cfg.bodySettle = b("sm_ttt_body_settle");
   cfg.propPickup = b("sm_ttt_prop_pickup");
 
   // RoleId: 1 = Innocent, 2 = Traitor, 3 = Detective.

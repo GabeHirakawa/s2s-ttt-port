@@ -11,6 +11,7 @@
  * and each body caches its own spawn position so proximity checks never touch the entity at all.
  */
 
+import { cfg } from "../core/cvars";
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
 import { MoveType, RoleId } from "../core/enums";
@@ -102,6 +103,8 @@ export function spawnBody(
   weapon: string,
   gameTime: number,
 ): Body | null {
+  // Bisect switch — see `sm_ttt_bodies_enabled`.
+  if (!cfg.bodiesEnabled) return null;
   const pawn = pawnOf(slot);
   if (pawn === null) return null;
   const origin = pawn.origin;
@@ -133,6 +136,10 @@ export function spawnBody(
   // Collision and movement are configured below, after the spawn — see `configureCorpsePhysics`.
   const ragdoll = createEntity("prop_ragdoll", { model, targetname: `ttt_body_${slot}` });
   if (ragdoll === null) return null;
+
+  // ENTITY-INDEX TRACE — see the note in `removeIcons`. If a corpse claims an index a transmit-hidden
+  // icon or glow prop just released, that is the suspected crash.
+  console.log(`[ttt] ENTTRACE make corpse slot=${String(slot)} index=${String(ragdoll.index)}`);
 
   configureCorpsePhysics(ragdoll);
 

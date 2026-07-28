@@ -17,6 +17,7 @@
  * one path here.
  */
 
+import { cfg } from "../core/cvars";
 import { nextFrame } from "@s2script/sdk/timers";
 import { HookResult, Player, type HookResultValue, type MatchStats } from "@s2script/cs2";
 // `fireToClient` lives on the engine-generic Events, not the CS2 typed overlay.
@@ -642,8 +643,12 @@ function handleDeath(
       const victimSlot = victim;
       void nextFrame().then(() => {
         if (!corpse.ref.isValid()) return;
-        settleBody(corpse);
-        setPawnAlpha(victimSlot, 0);
+        // Both steps are individually switchable — see `sm_ttt_body_settle` / `sm_ttt_body_hidepawn`.
+        // Clients have hard-crashed with `CopyExistingEntity: missing client entity N` on kills, and
+        // turning corpses off entirely removed all three of the ragdoll, the settle and the hide, so
+        // it never isolated which one.
+        if (cfg.bodySettle) settleBody(corpse);
+        if (cfg.bodyHidePawn) setPawnAlpha(victimSlot, 0);
       });
       // Exactly ONE pass, matching the C#'s single `NextWorldUpdate(correctRagdoll)`. Extra passes
       // at +250ms/+700ms were tried and make the corpse convulse: by then the ragdoll is simulating,

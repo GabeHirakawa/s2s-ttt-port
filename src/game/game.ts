@@ -23,7 +23,7 @@ import { msg } from "../core/msgs";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
-import { assignRoles, revealTraitorBuddies, roleName } from "./roles";
+import { assignRoles, revealTraitorBuddies, roleName, stripRoundWeapons } from "./roles";
 import { clearLog, printLogs } from "./logger";
 import { clearBodies } from "../cs2/bodies";
 import { isPlayingTeam, respawn, setPawnIsAlive, tellAll } from "../cs2/pawn";
@@ -276,6 +276,10 @@ export function endGame(winner: RoleId, reason?: string): void {
   );
 
   revealRoles();
+  // Take last round's arsenal back NOW, not when the next round's roles are dealt: the window
+  // between the restart and role selection is when players arm themselves off the map, and stripping
+  // at assignment confiscated exactly that. See `stripRoundWeapons`.
+  stripRoundWeapons();
   printLogs();
   game.roundsThisMap++;
 

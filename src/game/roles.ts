@@ -179,11 +179,6 @@ function choose(pool: number[], role: RoleId): number {
 export function applyLoadout(slot: number, role: RoleId): void {
   tell(slot, msgFor(slot, "ROLE_ASSIGNED", roleNameFor(slot, role)));
 
-  // Clear last round's arsenal before the loadout goes on, keeping the knife and any pistol — see
-  // `stripToSidearms`. Without this a player keeps everything they bought or picked up last round,
-  // so a Traitor who bought an AWP starts every subsequent round with it.
-  if (cfg.stripOnAssign) stripToSidearms(slot);
-
   const hp = cfg.roleHealth[role]!;
   if (hp > 0) setHealth(slot, hp);
   const armor = cfg.roleArmor[role]!;
@@ -191,6 +186,23 @@ export function applyLoadout(slot: number, role: RoleId): void {
 
   const weapons = cfg.roleWeapons[role]!;
   for (let i = 0; i < weapons.length; i++) give(slot, weapons[i]!);
+}
+
+/**
+ * Strip last round's arsenal, at the END of the round.
+ *
+ * NOT at role assignment, which is where this used to run and which broke the mode. The pre-round
+ * window — after the restart, before roles are dealt — is when players go and pick up weapons off the
+ * map; that is how a round is armed. Stripping at assignment therefore confiscated exactly what
+ * everyone had just spent that window collecting. Stripping when the round ENDS leaves the pre-round
+ * scavenge intact and still stops a bought AWP surviving into the next round.
+ *
+ * Keeps the knife and any pistol — see `stripToSidearms`.
+ */
+export function stripRoundWeapons(): void {
+  if (!cfg.stripOnAssign) return;
+  const active = reg.activeSlots();
+  for (let i = 0; i < active.length; i++) stripToSidearms(active[i]!);
 }
 
 /**
