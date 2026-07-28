@@ -28,7 +28,7 @@ import { damageDiag, killWithGadget } from "./cs2/combat";
 import { Voice } from "@s2script/sdk/voice";
 import { adminSetKarma, karmaOf, timeoutRemaining } from "./karma/karma";
 import {
-  allItems, balanceOf, canPurchase, itemById, PurchaseResult, sortedFor, tryPurchase,
+  addBalance, allItems, balanceOf, canPurchase, itemById, PurchaseResult, sortedFor, tryPurchase,
   type ShopItem,
 } from "./shop/shop";
 import { roundIds, startSpecialRounds } from "./special/rounds";
@@ -379,6 +379,32 @@ export function registerCommands(commands: CtxCommands): void {
    * `markGadgetKill`, the same attribution path the tripwire and cluster fragments use, so the corpse
    * records a real killer rather than the suicide a bare health write would produce.
    */
+  /**
+   * `sm_ttt_credits <target> <amount>` — set someone's shop balance outright. ROOT only.
+   *
+   * A testing aid: role-gated items cost enough that trying one repeatedly means playing several
+   * rounds to afford it. Goes through `addBalance` with the delta rather than writing the balance
+   * directly, so the `balance` bus event still fires and anything listening stays consistent.
+   */
+  commands.registerAdmin("sm_ttt_credits", ADMFLAG.ROOT, (cmd) => {
+    if (cmd.arg(0) === "" || cmd.arg(1) === "") {
+      cmd.reply("usage: sm_ttt_credits <target> <amount>");
+      return;
+    }
+    const slot = resolveTarget(cmd.arg(0));
+    if (slot < 0) {
+      cmd.reply(msgFor(cmd.callerSlot, "CMD_NO_PLAYER_MATCH", cmd.arg(0)));
+      return;
+    }
+    const want = Number.parseInt(cmd.arg(1), 10);
+    if (!Number.isFinite(want) || want < 0) {
+      cmd.reply(`'${cmd.arg(1)}' is not a credit amount`);
+      return;
+    }
+    addBalance(slot, want - balanceOf(slot), "Admin", false);
+    cmd.reply(`${reg.nameOf(slot)} now has ${String(balanceOf(slot))} credits`);
+  });
+
   commands.registerAdmin("sm_ttt_testkill", ADMFLAG.ROOT, (cmd) => {
     if (cmd.arg(0) === "") {
       cmd.reply("usage: sm_ttt_testkill <victim> [killer]  (killer defaults to a live Traitor)");

@@ -17,12 +17,14 @@
 import { UserMessages, type UserMessageView } from "@s2script/sdk/usermessages";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { Server } from "@s2script/sdk/server";
-import type { EntityRef } from "@s2script/sdk/entity";
+import { createEntity, type EntityRef } from "@s2script/sdk/entity";
+import { Transmit } from "@s2script/sdk/transmit";
 import { after } from "@s2script/sdk/timers";
 import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
 import { Vector } from "@s2script/sdk/math";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { ChatColors, wrapEntity } from "@s2script/cs2";
+import { roleModel } from "../cs2/icons";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { n, s } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
@@ -357,11 +359,122 @@ const DNA_ID_SECONDS = 4;
 const DNA_LOCK_BANNER = 3;
 /** Cue for the moment a trace resolves to a person. */
 const SND_DNA_LOCK = "c4.disarmfinish";
-/** Arrow glyphs, hard left to hard right. */
-const DNA_ARROWS = ["<<", "<", "^", ">", ">>"];
+/**
+ * Arrow glyphs, hard left to hard right.
+ *
+ * NOT `<<` / `<`. The centre-screen HUD renders its token as HTML, so a literal `<` opens a tag and
+ * the parser eats the glyph — the left arrows silently rendered as nothing while `>` and `>>` came
+ * through fine, so the readout only ever appeared to say "straight" or "right". Any glyph used here
+ * must be HTML-safe.
+ */
+const DNA_ARROWS = ["\u25C0\u25C0", "\u25C0", "\u25B2", "\u25B6", "\u25B6\u25B6"];
+
+/**
+ * The through-wall marker on an identified killer: a relay bone-merged to their pawn and a glow model
+ * merged onto the relay, both invisible except for the outline, both transmitted ONLY to the
+ * Detective who identified them.
+ *
+ * Two entities rather than one, and `kRenderTransAlpha` rather than `kRenderNone`, because that is
+ * what the Traitor glow proved works: the glow pass does not render correctly on the entity doing the
+ * bone-merge, and kRenderNone drops the entity from rendering altogether — taking the glow with it.
+ */
+const dnaGlowRelay: (EntityRef | null)[] = new Array<EntityRef | null>(MAX_SLOTS).fill(null);
+const dnaGlowModel: (EntityRef | null)[] = new Array<EntityRef | null>(MAX_SLOTS).fill(null);
+
+/** `RenderMode_t::kRenderTransAlpha`. NOT kRenderNone — see above. */
+const DNA_GLOW_RENDER = 1;
+
+/** Pack RGBA into the uint32 `m_glowColorOverride` hold (red in the low byte). */
+function packGlow(r: number, g: number, b: number): number {
+  return ((r & 0xff) | ((g & 0xff) << 8) | ((b & 0xff) << 16) | (255 << 24)) >>> 0;
+}
+
+/** Tear down `slot`'s marker. CHILD FIRST: the model is merged onto the relay, so the relay is its
+ *  parent, and destroying a parent while clients still hold the child is what produces
+ *  `CopyExistingEntity: missing client entity`. */
+function clearDnaGlow(slot: number): void {
+  const model = dnaGlowModel[slot];
+  if (model !== null) {
+    Transmit.reset(model);
+    model.remove();
+    dnaGlowModel[slot] = null;
+  }
+  const relay = dnaGlowRelay[slot];
+  if (relay !== null) {
+    Transmit.reset(relay);
+    relay.remove();
+    dnaGlowRelay[slot] = null;
+  }
+}
+
+/**
+ * Build the marker on `target`, seen only by `viewer`.
+ *
+ * FAIL-CLOSED: if the transmit rule is refused the pair is destroyed, because a marker everyone can
+ * see hands the whole server the killer's identity — the exact thing the Detective had to work for.
+ */
+function spawnDnaGlow(viewer: number, target: number): void {
+  clearDnaGlow(viewer);
+  const pawn = pawnOf(target);
+  if (pawn === null || !pawn.isValid) return;
+  const model = roleModel(reg.roleOf(target));
+
+  const relay = createEntity("prop_dynamic", { model, targetname: `ttt_dna_relay_${viewer}` });
+  if (relay === null) return;
+  const glow = createEntity("prop_dynamic", { model, targetname: `ttt_dna_glow_${viewer}` });
+  if (glow === null) {
+    relay.remove();
+    return;
+  }
+
+  const relayFields = wrapEntity("CBaseModelEntity", relay);
+  const glowFields = wrapEntity("CBaseModelEntity", glow);
+  relayFields.renderMode = DNA_GLOW_RENDER;
+  glowFields.renderMode = DNA_GLOW_RENDER;
+
+  const g = glowFields.glow;
+  g.glowColorOverride = packGlow(80, 255, 120);
+  g.glowType = 3;   // through walls
+  g.glowTeam = -1;
+  g.glowRange = 5000;
+  g.glowRangeMin = 0;
+  g.glowing = true;
+
+  relay.acceptInput("FollowEntity", "!activator", pawn.ref, relay);
+  glow.acceptInput("FollowEntity", "!activator", relay, glow);
+
+  const only = [viewer];
+  if (!Transmit.setVisibleTo(relay, only) || !Transmit.setVisibleTo(glow, only)) {
+    Transmit.reset(glow);
+    glow.remove();
+    Transmit.reset(relay);
+    relay.remove();
+    return;
+  }
+  dnaGlowRelay[viewer] = relay;
+  dnaGlowModel[viewer] = glow;
+}
+
+/**
+ * Repaint the marker: GREEN while the trace is fresh, through amber, to RED as it decays, pulsing
+ * throughout so it reads as a live signal rather than a static outline.
+ */
+function paintDnaGlow(viewer: number, fracLeft: number, now: number): void {
+  const glow = dnaGlowModel[viewer];
+  if (glow === null || !glow.isValid()) return;
+  // ~1.4 Hz, never fully dark: the pulse is a brightness ramp, not a blink, so the target stays
+  // trackable at the bottom of the cycle.
+  const pulse = 0.55 + 0.45 * Math.abs(Math.sin(now * 4.4));
+  const f = Math.max(0, Math.min(1, fracLeft));
+  const r = Math.round((255 - 175 * f) * pulse);
+  const g = Math.round((80 + 175 * f) * pulse);
+  const b = Math.round(90 * f * pulse);
+  wrapEntity("CBaseModelEntity", glow).glow.glowColorOverride = packGlow(r, g, b);
+}
 
 /** Clear every live DNA lead (round boundary). */
 export function resetDnaTracking(): void {
+  for (let slot = 0; slot < MAX_SLOTS; slot++) clearDnaGlow(slot);
   dnaTarget.fill(-1);
   dnaExpiry.fill(0);
   dnaProgress.fill(0);
@@ -385,8 +498,12 @@ export function tickDnaTracker(dt: number): void {
     // Expired, target dead, or the scanner died: the lead is over and the HUD line goes with it.
     if (left <= 0 || !reg.isAlive(slot) || !reg.isAlive(target)) {
       dnaTarget[slot] = -1;
+      clearDnaGlow(slot);
       setCenterHud(slot, "");
       continue;
+    }
+    if (dnaIdentified[slot] === 1) {
+      paintDnaGlow(slot, left / Math.max(1, n("sm_ttt_shop_dna_decay_time")), now);
     }
 
     const me = pawnOf(slot);
@@ -423,6 +540,9 @@ export function tickDnaTracker(dt: number): void {
         // that owns the screen for a moment, and a cue — a Detective mid-chase is not reading chat.
         tell(slot, msgFor(slot, "DNA_TRACK_IDENTIFIED", reg.nameOf(target)));
         Sound.emit(SND_DNA_LOCK, { recipients: [slot] });
+        // The reward for the work: from here the killer is visible through walls, to this Detective
+        // only, until the trace goes cold.
+        spawnDnaGlow(slot, target);
       }
     }
 
