@@ -794,8 +794,9 @@ export function placeTripwire(slot: number): boolean {
   // Traitor-only outlines over both anchors, so a Traitor can see where a team-mate wired a doorway
   // without walking into it. Innocents see the plain anchors exactly as before.
   //
-  // Gated: see `sm_ttt_shop_tripwire_glow`. These are extra networked props with a per-viewer
-  // transmit rule, and they are the prime suspect for a client-side network fatal.
+  // Gated behind `sm_ttt_shop_tripwire_glow` (on by default) so they can be taken out of the picture
+  // without a rebuild — they are extra networked props carrying a per-viewer transmit rule, which
+  // makes them worth eliminating first if client-side network fatals ever come back.
   const glowOn = b("sm_ttt_shop_tripwire_glow");
   const glowA = !glowOn ? null : spawnTripwireGlow(surfaceA.x, surfaceA.y, surfaceA.z, nx, ny, nz, `ttt_tripwire_glow_a_${slot}`);
   const glowB = !glowOn ? null : spawnTripwireGlow(surfaceB.x, surfaceB.y, surfaceB.z, -nx, -ny, -nz, `ttt_tripwire_glow_b_${slot}`);

@@ -207,13 +207,13 @@ const SPECS: readonly Spec[] = [
   // so a wire strung anywhere but a doorway found nothing and fell back to a stub. The C# puts no
   // length on its span trace, so this is generous by default.
   S("sm_ttt_shop_tripwire_max_span", "float", 4096, "How far a Tripwire reaches for the opposite surface", 64, 16384),
-  // OFF by default pending investigation. The glow twin is an extra NETWORKED prop carrying a
-  // per-viewer transmit rule, and a client hard-crashed inside the network system (Plat_FatalError
-  // via libnetworksystem) shortly after this shipped. That is the same failure class as the earlier
-  // `CopyExistingEntity: missing client entity` fatals, and an entity that some clients are told
-  // about and others are not is the most plausible source of one. Not proven — which is exactly why
-  // it defaults off rather than staying on.
-  S("sm_ttt_shop_tripwire_glow", "bool", false, "Traitor-only glow on placed Tripwires"),
+  // This defaulted OFF while transmit filtering was the leading suspect for the
+  // `CopyExistingEntity: missing client entity` fatals — the glow twin is an extra networked prop
+  // carrying a per-viewer transmit rule, so it was the obvious thing to take out of the picture.
+  // The bisect since undercut that theory: a crash reproduced on a kill involving a player with no
+  // transmit-filtered entities at all, and a long session with icons (which use the same mechanism)
+  // fully enabled produced none. Filtering is no longer the reason to keep this off, so it is on.
+  S("sm_ttt_shop_tripwire_glow", "bool", true, "Traitor-only glow on placed Tripwires"),
   // --- crash bisect switches ---------------------------------------------------------------
   // Clients have hard-crashed with `CopyExistingEntity: missing client entity N`, which is what a
   // client says about an entity it was never sent. TRANSMIT FILTERING is the only mechanism here
