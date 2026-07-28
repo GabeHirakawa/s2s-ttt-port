@@ -18,7 +18,7 @@ import { Server } from "@s2script/sdk/server";
 import { Entity, type EntityRef } from "@s2script/sdk/entity";
 import { Beam, type BeamHandle } from "@s2script/cs2";
 import { Button, GameState, MAX_SLOTS, RoleId } from "../core/enums";
-import { cfg } from "../core/cvars";
+import { cfg, n } from "../core/cvars";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
@@ -47,13 +47,16 @@ const EYE_HEIGHT = 64;
 /** Translucent white, matching `Color.FromArgb(32, Color.White)` + `kRenderTransAlpha`. */
 const BEAM_COLOR: [number, number, number, number] = [255, 255, 255, 32];
 const BEAM_WIDTH = 2;
-/** Corpse spin, from `PropMover.moveBody`: degrees per second, orbit radius, perpendicular bias. */
-const BODY_SPIN_RATE = 64;
-const BODY_ORBIT = 32;
-const BODY_BIAS = 16;
-/** `DEAD_ANGLE` — the pitch/roll a carried ragdoll is held at; the yaw is spun. */
+/**
+ * The pose a carried corpse is pinned to: lying on its side, yaw following the carrier.
+ *
+ * The C#'s clock-driven spin (`BODY_SPIN_RATE`) and orbit offset are gone — those are what made a
+ * carried body read as a rotating signpost. Letting PHYSICS hold it instead was tried and is worse:
+ * with the root snapped to the hold point every frame, the solver fights the teleport and the corpse
+ * spasms. Holding it rigid is the honest option while `EntityRef` exposes no origin getter — a real
+ * spring needs to read where the body actually is each frame, and nothing here can.
+ */
 const DEAD_PITCH = 90;
-const DEAD_YAW = 45;
 const DEAD_ROLL = 90;
 
 /** The prop each slot is currently carrying, or null. */
@@ -333,24 +336,43 @@ function carry(slot: number, prop: EntityRef): void {
   let y = eye.y + forward.y * distance;
   const z = eye.z + forward.z * distance;
 
-  // A corpse is dragged, not held: `moveBody` orbits the hold point and spins the ragdoll so it
-  // reads as a body being hauled along. Props keep the plain zero-angle teleport, which is what the
-  // C# `prop_physics_multiplayer` branch did.
-  let deadAngles: number[] | null = null;
+  // A CORPSE HANGS FROM ITS MIDDLE AND IS LEFT TO SWING; a prop keeps the plain rigid carry.
+  //
+  // Two things were wrong with the body case. A ragdoll's origin sits at its FEET, so putting the
+  // origin on the hold point hung the body by its ankles — the beam terminated there and the corpse
+  // dangled upside-down beneath it. Dropping the target by a torso height puts the hold point through
+  // the chest instead.
+  //
+  // The rest was a forced pose: the body was spun on a clock (`BODY_SPIN_RATE`), pushed around an
+  // orbit, pinned to fixed angles, and had its velocity ZEROED every frame. That is four separate
+  // ways of telling the physics solver what to do, and together they made a corpse behave like a
+  // rotating signpost. Passing null for both angles and velocity moves the root and leaves everything
+  // else to physics, so the limbs trail and the body settles as it is dragged.
   const carriedBody = bodyByEntity(prop.index);
-  if (carriedBody !== undefined) {
-    const rotDeg = (Server.gameTime * BODY_SPIN_RATE) % 360;
-    const rad = rotDeg * (Math.PI / 180);
-    const cos = Math.cos(rad);
-    const sin = Math.sin(rad);
-    // Bias along the perpendicular (cos/sin of rad + 90°), then step back along the orbit radius —
-    // this is `endPos += bias; endPos -= off` from the original, folded into one add.
-    x += -sin * BODY_BIAS - cos * BODY_ORBIT;
-    y += cos * BODY_BIAS - sin * BODY_ORBIT;
-    deadAngles = [DEAD_PITCH, DEAD_YAW + rotDeg, DEAD_ROLL];
-  }
+  const isBody = carriedBody !== undefined;
 
-  prop.teleport([x, y, z], deadAngles, [0, 0, 0]);
+  // Pull the ROOT back along the body's length so its middle lands on the hold point.
+  //
+  // That length runs along the carrier's RIGHT vector, measured in game rather than derived: with
+  // `pitch 90` AND `roll 90` the model's feet-to-head axis ends up perpendicular to the view, so the
+  // corpse extends off to one side. Offsetting on Z (upright-body thinking) and then along FORWARD
+  // were both wrong for the same reason — the axis was assumed from the angle convention instead of
+  // observed. Right = (sin yaw, -cos yaw) for Source's counter-clockwise yaw.
+  const yawRad = angles.y * (Math.PI / 180);
+  const rightX = Math.sin(yawRad);
+  const rightY = -Math.cos(yawRad);
+  const half = n("sm_ttt_carry_body_offset");
+  const putX = isBody ? x - rightX * half : x;
+  const putY = isBody ? y - rightY * half : y;
+  const putZ = z;
+  const holdZ = z;
+
+  // Held rigid, and the yaw simply follows the carrier so the body swings round with them instead of
+  // spinning on its own clock. Velocity is zeroed for the same reason the angles are pinned: anything
+  // the solver is allowed to do here turns into a spasm, because the root is being snapped rather
+  // than pulled.
+  const deadAngles = isBody ? [DEAD_PITCH, angles.y, DEAD_ROLL] : [0, 0, 0];
+  prop.teleport([putX, putY, putZ], deadAngles, [0, 0, 0]);
 
   // Keep the body's cached position in step with where it actually is.
   //
@@ -363,9 +385,10 @@ function carry(slot: number, prop: EntityRef): void {
   // (The C# never needed this: it identified through the engine's own PropPickupEvent rather than a
   // trace, so collision group never entered into it.)
   if (carriedBody !== undefined) {
+    // Cache the CENTRE, which is what a player aims at to identify it, not the feet.
     carriedBody.x = x;
     carriedBody.y = y;
-    carriedBody.z = z;
+    carriedBody.z = holdZ;
   }
 
   const beam = carryBeam[slot];
@@ -373,7 +396,9 @@ function carry(slot: number, prop: EntityRef): void {
     // The far end tracks where the object was just put, not the pre-orbit hold point — an
     // `EntityRef` exposes no origin to read it back from, and this is the same position one frame
     // earlier than the C#'s `AbsOrigin` read.
-    beam.update(new Vector(origin.x, origin.y, origin.z + HAND_HEIGHT), new Vector(x, y, z));
+    // The far end is the HOLD point (centre mass), not where the root was placed — otherwise the
+    // beam visibly ends at the corpse's ankles.
+    beam.update(new Vector(origin.x, origin.y, origin.z + HAND_HEIGHT), new Vector(x, y, holdZ));
   }
 }
 
