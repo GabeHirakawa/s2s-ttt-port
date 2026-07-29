@@ -17,7 +17,7 @@
 import { delay } from "@s2script/sdk/timers";
 import { Server } from "@s2script/sdk/server";
 import { GameRules, RoundEndReason, Teams } from "@s2script/cs2";
-import { GameState, RoleId, Team } from "../core/enums";
+import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
 import { cfg, refresh, roundDuration } from "../core/cvars";
 import { msg } from "../core/msgs";
 import * as reg from "../core/registry";
@@ -26,7 +26,7 @@ import type { TttEvents } from "../core/events";
 import { assignRoles, revealTraitorBuddies, roleName, stripRoundWeapons } from "./roles";
 import { clearLog, printLogs } from "./logger";
 import { clearBodies } from "../cs2/bodies";
-import { isPlayingTeam, respawn, setPawnIsAlive, tellAll } from "../cs2/pawn";
+import { isPlayingTeam, respawn, restoreFullHealth, setPawnIsAlive, tellAll } from "../cs2/pawn";
 import { resetTeamsToT, revealAllRoles } from "./teams";
 import { setSpoofingEnabled } from "../cs2/spoof";
 
@@ -141,7 +141,12 @@ export function startGame(quiet = false): void {
   tellAll(msg("GAME_STATE_STARTING", cfg.countdownSeconds));
 
   const mine = ++epoch;
-  GameRules.get()?.setTimeRemaining(cfg.countdownSeconds + 5);
+  // EXACTLY the countdown, with nothing added. This used to be `countdownSeconds + 5`, which put the
+  // HUD clock five seconds ahead of the thing it was counting down to: the round went live with the
+  // clock reading 0:05 and players learned to ignore it. The engine cannot end the round when this
+  // reaches zero — `mp_ignore_round_win_conditions 1` is set on the very next line — and `beginRound`
+  // re-arms the clock with the round length in the same instant the countdown expires.
+  GameRules.get()?.setTimeRemaining(cfg.countdownSeconds);
   Server.command("mp_ignore_round_win_conditions 1");
 
   // Put everyone back on T as the countdown OPENS, not just from the 1 Hz countdown ticker: last
@@ -253,6 +258,82 @@ export function checkEndConditions(): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Slots seen as "registry says alive, engine says dead" on the LAST reconcile pass.
+ *
+ * A silent death is only acted on once it has been observed twice running, a second apart. The
+ * transients this filters out are real: `deal` moves the Detective to CT and `switchTeam` may
+ * respawn the pawn, so for a frame or two at the very top of a round that player legitimately has
+ * no live pawn to read. Acting on a single observation would kill them off the moment they were
+ * dealt the role.
+ */
+const suspectedDead = new Uint8Array(MAX_SLOTS);
+
+/**
+ * Re-derive the roster and liveness from the ENGINE, and end the round if that changes the answer.
+ *
+ * `checkEndConditions` is O(1) because it reads counters the registry maintains incrementally, from
+ * events. That is only sound while every departure and every death actually delivers an event, and
+ * two common ones do not:
+ *
+ * - **A slay.** `pawn.slay()` (CommitSuicide) produces no `player_death` this plugin receives —
+ *   verified on a live server, and the reason {@link killWithGadget} exists at all. An admin
+ *   `sm_slay` therefore left the victim's alive flag set forever. Slay the last Traitor and the
+ *   Innocents never won: the registry still counted a living Traitor, so the round ran until the
+ *   round timer expired minutes later.
+ * - **A kick, or any disconnect whose client event is missed.** `syncRoster` was called only from
+ *   the WAITING and COUNTDOWN paths, never during a live round, so a roster that drifted mid-round
+ *   stayed drifted for the rest of it — a kicked player kept his role, his alive flag and his vote
+ *   in the win condition.
+ *
+ * The 1 Hz `checkEndConditions` poll was supposed to be the safety net for exactly this, but it
+ * re-read the same stale counters every second and so could never converge on an answer they did
+ * not already contain. This runs at the same 1 Hz and fixes the INPUT first, which is what makes
+ * that poll a real guarantee rather than a repeated identical question.
+ *
+ * Cost is one `Player.allConnected()` and one pawn read per participant, once a second.
+ */
+export function reconcileRound(): void {
+  if (game.state !== GameState.InProgress) return;
+
+  // Roster first: a slot the engine no longer reports is dropped here, which clears its role and
+  // decrements the alive counter it was still contributing to.
+  syncRosterAndAnnounce();
+
+  const active = reg.activeSlots();
+  for (let i = 0; i < active.length; i++) {
+    const slot = active[i]!;
+    // Only participants matter to the win check, and only ones we still believe are alive can be
+    // wrong in the direction that hangs a round.
+    if (!reg.isParticipating(slot) || !reg.isAlive(slot) || reg.computeAlive(slot)) {
+      suspectedDead[slot] = 0;
+      continue;
+    }
+    if (suspectedDead[slot] === 0) {
+      suspectedDead[slot] = 1;
+      continue;
+    }
+    suspectedDead[slot] = 0;
+    silentDeath(slot);
+  }
+
+  checkEndConditions();
+}
+
+/**
+ * Record a death that no engine event announced.
+ *
+ * Deliberately NOT a full {@link killWithGadget}: there is no killer to credit and, by the time this
+ * notices, no pawn origin left to place a corpse at. What it does do is everything the win condition
+ * and the scoreboard depend on — clear the alive flag (and with it the per-role counter) and put the
+ * `death` event on the bus so karma, stats and the icon cleanup all see it, with no killer, exactly
+ * as a player ducking to spectator produces.
+ */
+function silentDeath(slot: number): void {
+  reg.setAlive(slot, false);
+  bus.emit("death", { slot, killer: -1, assister: -1, weapon: "", headshot: false });
 }
 
 /** End the round with `winner` (or {@link RoleId.None} plus a `reason` for a non-role end). */
@@ -405,8 +486,15 @@ export function tickCountdown(dt: number): void {
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
-    if (reg.isAlive(slot)) continue;
-    if (isPlayingTeam(slot)) respawn(slot);
+    if (!isPlayingTeam(slot)) continue;
+    if (!reg.isAlive(slot)) {
+      respawn(slot);
+      continue;
+    }
+    // Alive already — which means they carried last round's health, armor and inflated max health
+    // in with them. A respawn would fix that but also teleport them back to spawn mid-countdown, so
+    // reset the values directly instead. See `restoreFullHealth`.
+    restoreFullHealth(slot);
   }
   reg.resyncAlive();
 }

@@ -76,6 +76,32 @@ export function clearAttributedKills(): void {
   pendingKiller.fill(-1);
 }
 
+/** The health every player starts a round on, before their role's own value is applied. */
+export const DEFAULT_HEALTH = 100;
+
+/**
+ * Put a player back to a clean slate: full health, default max health, no armor.
+ *
+ * Run through the countdown rather than only at role assignment. Health WAS being set per role at
+ * assignment, but three things survived the round boundary that should not have:
+ *
+ * - **Armor.** `applyLoadout` writes armor only when the role's configured value is above zero, and
+ *   every role defaults to zero — so a Kevlar bought last round was never taken back and carried
+ *   into the next one for free.
+ * - **Max health.** `setHealth` raises `maxHealth` to fit a larger value but never lowers it again,
+ *   so a special round that inflated it left every later round starting on the inflated ceiling.
+ * - **The countdown itself.** Health was restored at 0:00, which meant players spent the whole
+ *   15-second countdown looking at last round's health bar and could not tell whether the mode had
+ *   forgotten to heal them. Restoring throughout the countdown makes the reset visible.
+ */
+export function restoreFullHealth(slot: number): void {
+  const pawn = pawnOf(slot);
+  if (pawn === null || !pawn.isValid) return;
+  pawn.maxHealth = DEFAULT_HEALTH;
+  pawn.health = DEFAULT_HEALTH;
+  setArmor(slot, 0);
+}
+
 /** Set armor value (and the controller mirror the scoreboard reads). */
 export function setArmor(slot: number, value: number): void {
   const pawn = pawnOf(slot);

@@ -49,7 +49,7 @@ import * as reg from "./core/registry";
 
 import {
   checkEndConditions, game, initGame, inWarmup, onEngineRoundEnd, onEngineRoundStart, onMapChange,
-  startGame, syncRosterAndAnnounce, tickCountdown, tickWaiting,
+  reconcileRound, startGame, syncRosterAndAnnounce, tickCountdown, tickWaiting,
 } from "./game/game";
 import { logPurchase, logRoleAssigned } from "./game/logger";
 import { clearReservedRoles, roleName } from "./game/roles";
@@ -419,11 +419,16 @@ export default plugin((ctx) => {
     tickSpecialRounds();
 
     // Convergence guarantee: the win condition is also checked on death and disconnect, but a
-    // missed trigger would otherwise hang the round forever. The check is three integer reads.
+    // missed trigger would otherwise hang the round forever.
+    //
+    // This reconciles the roster and liveness against the ENGINE before checking, rather than
+    // re-reading the counters the missed trigger is exactly what left wrong. A bare
+    // `checkEndConditions()` here asked the same question of the same stale numbers every second
+    // and could never answer it differently — which is how a slay or a kick hung a round.
     endCheckAccum += dt;
     if (endCheckAccum >= 1) {
       endCheckAccum = 0;
-      checkEndConditions();
+      reconcileRound();
     }
   });
 

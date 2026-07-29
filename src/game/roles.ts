@@ -181,8 +181,11 @@ export function applyLoadout(slot: number, role: RoleId): void {
 
   const hp = cfg.roleHealth[role]!;
   if (hp > 0) setHealth(slot, hp);
-  const armor = cfg.roleArmor[role]!;
-  if (armor > 0) setArmor(slot, armor);
+  // Written UNCONDITIONALLY, unlike health's `> 0` guard. Every role's armor defaults to zero, so a
+  // "only write it when positive" rule meant the default configuration never touched armor at all —
+  // and a Kevlar bought last round therefore survived into this one. The countdown reset already
+  // zeroes it; this is what makes a role with armor configured still get it.
+  setArmor(slot, cfg.roleArmor[role]!);
 
   const weapons = cfg.roleWeapons[role]!;
   for (let i = 0; i < weapons.length; i++) give(slot, weapons[i]!);
