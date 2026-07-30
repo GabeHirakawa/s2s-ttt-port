@@ -69,7 +69,12 @@ export interface ShopItem {
   /** Extra gate beyond role/price. Return anything but Success to refuse. */
   canPurchase?: (slot: number) => PurchaseResult;
   /** Apply the item's effect. */
-  onPurchase: (slot: number) => void;
+  /**
+   * Apply the item. Returning `false` means the item could NOT be delivered — a placement that had
+   * nowhere to go, say — and {@link tryPurchase} then refunds the price and un-counts the purchase.
+   * Returning nothing means success, so an item with no failure mode needs no return at all.
+   */
+  onPurchase: (slot: number) => void | boolean;
 }
 
 const items: ShopItem[] = [];
@@ -193,7 +198,17 @@ export function tryPurchase(slot: number, item: ShopItem, tellWhy = true): Purch
     purchases[key] = purchases[key]! + 1;
   }
 
-  item.onPurchase(slot);
+  // An item that could not be delivered must not be charged for. A placeable gadget can refuse
+   // (no surface in reach), and the player was already debited above — so the money and the
+  // per-round purchase count both have to come back, or "too far away" quietly costs full price.
+  if (item.onPurchase(slot) === false) {
+    addBalance(slot, item.price, msgFor(slot, "SHOP_REFUNDED", msgFor(slot, item.nameKey)), tellWhy);
+    if (idx >= 0) {
+      const key = slot * items.length + idx;
+      purchases[key] = Math.max(0, purchases[key]! - 1);
+    }
+    return PurchaseResult.NotPurchasable;
+  }
   return PurchaseResult.Success;
 }
 

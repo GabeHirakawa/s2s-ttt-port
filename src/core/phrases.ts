@@ -67,6 +67,7 @@ export const PHRASES: Readonly<Record<string, string>> = {
 
   // ── CS2 layer ─────────────────────────────────────────────────────────────
   TRAITOR_CHAT_FORMAT: "{darkred}[TRAITORS] {red}{1}: {default}{2}",
+  DEAD_CHAT_FORMAT: "{grey}*DEAD* {default}{1}{grey}: {default}{2}",
   TASER_SCANNED: "%PREFIX%You scanned {1}{grey}, they are %an% {2}{grey}!",
   DNA_PREFIX: "{darkblue}D{blue}N{lightblue}A{grey} | {grey}",
   AFK_WARNING: "%PREFIX%You will be moved to spectators in {yellow}{1} second%s%{grey} for being AFK.",
@@ -88,6 +89,12 @@ export const PHRASES: Readonly<Record<string, string>> = {
   SHOP_PURCHASED_DETAIL: "%SHOP_PREFIX%{white}{1}{grey}.",
   SHOP_LIST_FOOTER:
     "%SHOP_PREFIX%You are %an% {1}{grey}, you have {yellow}{2}{grey} %CREDITS_NAME%%s%.",
+  SHOP_REFUNDED: "Refunded: {1}",
+  SHOP_MENU_TITLE: "Shop",
+  SHOP_MENU_CLOSED:
+    "%SHOP_PREFIX%Shop closed — {yellow}ping{grey} or type {yellow}!shop{grey} to open it again.",
+  SHOP_MENU_EXPIRED:
+    "%SHOP_PREFIX%Shop timed out — {yellow}ping{grey} or type {yellow}!shop{grey} to open it again.",
   CREDITS_NAME: "point",
   CREDITS_GIVEN: "%SHOP_PREFIX%{1}{2} %CREDITS_NAME%%s%",
   CREDITS_GIVEN_REASON: "%SHOP_PREFIX%{1}{2} %CREDITS_NAME%%s% {grey}({white}{3}{grey})",

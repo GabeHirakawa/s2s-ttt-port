@@ -14,11 +14,11 @@ import type { CtxCommands } from "@s2script/sdk/plugin";
 import type { CommandInvocation } from "@s2script/sdk/commands";
 import { ADMFLAG, Admin } from "@s2script/sdk/admin";
 import { ChatColors } from "@s2script/cs2";
-import { GameState, RoleId } from "./core/enums";
+import { GameState, MAX_SLOTS, RoleId } from "./core/enums";
 import { cfg } from "./core/cvars";
 import { msg, msgFor } from "./core/msgs";
 import * as reg from "./core/registry";
-import { getHealth, setHealth, teamOf, tellAll } from "./cs2/pawn";
+import { getHealth, setHealth, teamOf, tell, tellAll } from "./cs2/pawn";
 import { game, inWarmup, startGame, endGame } from "./game/game";
 import { reserveRole, roleName, roleNameFor } from "./game/roles";
 import { printLogsTo } from "./game/logger";
@@ -26,6 +26,7 @@ import { allBodies } from "./cs2/bodies";
 import { Entity } from "@s2script/sdk/entity";
 import { damageDiag, killWithGadget } from "./cs2/combat";
 import { Voice } from "@s2script/sdk/voice";
+import { Menu, MenuCancelReason, MenuStyle } from "@s2script/sdk/menu";
 import { adminSetKarma, karmaOf, timeoutRemaining } from "./karma/karma";
 import {
   addBalance, allItems, balanceOf, canPurchase, itemById, PurchaseResult, sortedFor, tryPurchase,
@@ -35,6 +36,110 @@ import { roundIds, startSpecialRounds } from "./special/rounds";
 
 /** Reusable buffer for the shop listing — one allocation for the plugin's lifetime. */
 const listBuffer: ShopItem[] = [];
+
+// --- the shop menu ------------------------------------------------------------------------------
+// Built on the SDK `Menu` rather than a bespoke "remember what I printed and watch chat for a
+// digit" scheme, which is what this used to be. That matters for correctness, not just tidiness:
+// `Menu` guarantees ONE open menu per slot and supersedes the previous one, so a player who opens
+// the shop while the nominate menu is up cannot have a single "2" understood by both. A hand-rolled
+// digit interceptor sits outside that guarantee and would double-fire against any other menu on the
+// server.
+//
+// Pagination (7 per chat page), the number keys, the Exit control and the timeout all come from the
+// framework too.
+
+/** Open the shop menu for `slot`. Shared by `!shop`, `!list` and the ping shortcut. */
+function openShopMenu(slot: number): void {
+  if (slot < 0) return;
+  if (game.state !== GameState.InProgress) {
+    tell(slot, msgFor(slot, "SHOP_INACTIVE"));
+    return;
+  }
+  const role = reg.roleOf(slot);
+  if (role === RoleId.None) return;
+
+  const items = sortedFor(slot, listBuffer);
+  const bal = balanceOf(slot);
+  tell(slot, msgFor(slot, "SHOP_LIST_FOOTER", roleName(role), bal));
+  if (items.length === 0) return;
+
+  const m = new Menu(msgFor(slot, "SHOP_MENU_TITLE"));
+  m.style = MenuStyle.Chat; // non-freezing: the player is mid-round and being hunted
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    // Unaffordable and role-locked items stay VISIBLE but disabled, for the same reason cooldown
+    // maps stay in the nominate menu: a catalogue that silently omits things cannot be learned from.
+    // `disabled` also keeps them off the number keys, so nothing is bought by accident.
+    // The chat menu renderer prints each line through Chat.toSlot, so colour bytes in the DISPLAY
+    // string render as they would in any other chat line. Price in amber, name in green when it can
+    // be bought and red when it cannot — the same read as the old flat listing.
+    const ok = canPurchase(slot, item) === PurchaseResult.Success && item.price <= bal;
+    const name = msgFor(slot, item.nameKey);
+    const price = `${ChatColors.Grey}[${ChatColors.Yellow}${item.price}${ChatColors.Grey}]`;
+    m.addItem(
+      item.id,
+      ok
+        ? `${price} ${ChatColors.Green}${name}`
+        : `${ChatColors.Grey}[${ChatColors.DarkRed}${item.price}${ChatColors.Grey}] ${ChatColors.Red}${name} - (cannot afford)`,
+      { disabled: !ok },
+    );
+  }
+
+  m.onSelect((e) => {
+    const item = itemById(e.info);
+    if (item === undefined) return;
+    // Re-validated here rather than trusted from display time: credits and liveness can both have
+    // changed between the menu being painted and the number being typed.
+    if (game.state !== GameState.InProgress || !reg.isAlive(e.slot)) {
+      tell(e.slot, msgFor(e.slot, "SHOP_INACTIVE"));
+      return;
+    }
+    if (tryPurchase(e.slot, item) !== PurchaseResult.Success) return; // prints its own refusal
+    tell(e.slot, msgFor(e.slot, "SHOP_PURCHASED", msgFor(e.slot, item.nameKey)));
+    const desc = msg(item.descKey);
+    if (desc !== "" && desc !== item.descKey) {
+      tell(e.slot, msgFor(e.slot, "SHOP_PURCHASED_DETAIL", desc));
+    }
+  });
+
+  m.onCancel((e) => {
+    // Only the two closes the PLAYER caused are worth a word. `NewMenu` means they opened something
+    // else and are looking at it — telling them the shop closed would be noise about a thing they
+    // just did on purpose — and `Disconnect` has nobody left to tell.
+    if (e.reason === MenuCancelReason.Exit) tell(e.slot, msgFor(e.slot, "SHOP_MENU_CLOSED"));
+    else if (e.reason === MenuCancelReason.Timeout) tell(e.slot, msgFor(e.slot, "SHOP_MENU_EXPIRED"));
+  });
+
+  m.display(slot, MENU_SECONDS);
+  openMenus[slot] = m;
+}
+
+/** How long the shop menu stays open with no selection. */
+const MENU_SECONDS = 30;
+
+/** The live shop menu per slot, so a round boundary can close it. */
+const openMenus: (Menu | null)[] = new Array<Menu | null>(MAX_SLOTS).fill(null);
+
+/**
+ * Close every open shop menu — round boundary and map change.
+ *
+ * A menu printed last round must not stay answerable into this one: its contents came from the old
+ * role and balance, so a stale number would buy something the player never saw offered.
+ */
+export function resetShopMenus(): void {
+  for (let i = 0; i < MAX_SLOTS; i++) {
+    const m = openMenus[i];
+    if (m !== null) m.close(i);
+    openMenus[i] = null;
+  }
+}
+
+/** Open the shop from a middle-mouse ping. */
+export function onPlayerPing(slot: number): void {
+  if (slot < 0 || slot >= MAX_SLOTS) return;
+  if (game.state !== GameState.InProgress || !reg.isAlive(slot)) return;
+  openShopMenu(slot);
+}
 
 /** The version string reported by `!ttt`. */
 const VERSION = "0.1.0";
@@ -195,6 +300,24 @@ export function registerCommands(commands: CtxCommands): void {
   commands.register("sm_purchase", buy);
   commands.register("sm_b", buy);
   commands.register("sm_list", list);
+  // `!shop`/`!list` from a player opens the interactive menu; the console still gets the plain dump.
+  // The middle-mouse ping opens the shop — the one input a CS2 player has spare mid-round that
+  // costs no keyboard hand, which matters in a mode where stopping to type is how you get shot.
+  //
+  // `player_ping` is a CLIENT CONSOLE COMMAND, not a game event: subscribing to a game event of
+  // that name (the obvious-looking thing) receives nothing, because no such event is ever fired.
+  // The C# hooked it with `AddCommandListener`, and `onClientCommand` is that same seam —
+  // `register` cannot be used here, because the ENGINE already owns the name and refuses to link a
+  // second ConCommand to it. Observe-only: no HookResult is returned, so the ping marker is still
+  // placed exactly as normal.
+  commands.onClientCommand("player_ping", (slot) => {
+    onPlayerPing(slot);
+  });
+
+  commands.register("sm_menu", (cmd) => {
+    if (cmd.callerSlot < 0) list(cmd);
+    else openShopMenu(cmd.callerSlot);
+  });
 
   commands.register("sm_shop", (cmd) => {
     const sub = cmd.arg(0).toLowerCase();
@@ -209,7 +332,8 @@ export function registerCommands(commands: CtxCommands): void {
         return;
       case "":
       case "list":
-        list(cmd);
+        if (cmd.callerSlot >= 0) openShopMenu(cmd.callerSlot);
+        else list(cmd);
         return;
       default:
         cmd.reply(msgFor(cmd.callerSlot, "GENERIC_USAGE", "shop <list|buy [item]|balance>"));
