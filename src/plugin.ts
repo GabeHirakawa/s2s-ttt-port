@@ -153,12 +153,16 @@ function applyServerSettings(): void {
   Server.command("mp_autoteambalance 0"); // teams are a TTT implementation detail
   Server.command("mp_limitteams 0");
   // VOICE. TTT arbitrates who can hear whom itself (`Voice.setAudibleTo` — dead players talk to the
-  // dead, the living cannot listen in), which requires the ENGINE to be permissive so the plugin can
-  // do the restricting. With alltalk off the engine additionally blocks living voices from crossing
-  // the alive/dead line, and the result on a live server was that nobody could hear anybody at all.
-  // Same category as `mp_teammates_are_enemies`: the engine is opened up so TTT can arbitrate.
+  // dead, the living cannot listen in), which requires the ENGINE to be permissive between LIVING
+  // players so the plugin can do the restricting. With alltalk off entirely, the engine also blocks
+  // living voices across the team line and the result on a live server was that nobody could hear
+  // anybody. Same category as `mp_teammates_are_enemies`: the engine is opened up so TTT arbitrates.
   Server.command("sv_alltalk 1");
-  Server.command("sv_full_alltalk 1");
+  // `sv_full_alltalk` is deliberately NOT set. It governs the ALIVE/DEAD line, which is the one
+  // boundary TTT most needs held: a dead player naming their killer to the living ends the round's
+  // central secret. Turning it on would make the plugin's voice masks the ONLY thing preventing that
+  // leak; leaving it off keeps the engine as a second barrier underneath them. Dead-to-dead voice
+  // does not need it — that is the engine's default behaviour for dead players.
 
   // CLIENT-CRASH MITIGATION, asserted here rather than left to operator config.
   //
