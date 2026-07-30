@@ -565,15 +565,10 @@ export function tickCountdown(dt: number): void {
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
     if (!isPlayingTeam(slot)) {
-      console.log(`[ttt] SPAWNDIAG slot=${slot} SKIPPED team=${teamOf(slot)} alive=${reg.isAlive(slot)}`);
       continue;
     }
     if (!reg.isAlive(slot)) {
-      const ok = respawn(slot);
-      const pw = pawnOf(slot);
-      console.log(`[ttt] SPAWNDIAG slot=${slot} respawn=${ok} team=${teamOf(slot)} `
-        + `engineAlive=${reg.computeAlive(slot)} pawn=${pw === null ? "null" : "yes"} `
-        + `lifeState=${pw?.lifeState ?? -1} hp=${pw?.health ?? -1}`);
+      respawn(slot);
       continue;
     }
     // Alive already — which means they carried last round's health, armor and inflated max health
