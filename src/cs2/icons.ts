@@ -369,27 +369,50 @@ function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
 
 /** Destroy `slot`'s panels and drop their visibility rules. */
 function removeIcons(slot: number): void {
+  parkIcons(slot);
+}
+
+/**
+ * Hide `slot`'s markers WITHOUT destroying them — the mid-round path.
+ *
+ * Destroying them was the crash. A transmit-filtered entity is, by construction, absent from some
+ * clients' entity tables; free its index mid-round and the engine recycles it for something everyone
+ * DOES receive (a corpse — observed directly: `make icon slot=4 part=1 index=776`, `free`, then
+ * `make corpse slot=1 index=776`). The client is then told to update an index it has no record of,
+ * which is precisely what `CopyExistingEntity: missing client entity N` reports. The engine's
+ * recycle protection has bypass paths on this build, so the index must simply not be freed.
+ *
+ * Hiding costs one transmit rule per part and no entity churn: an empty viewer list means nobody
+ * receives them. The indices stay ours until {@link clearAllIcons} destroys them at a round boundary,
+ * where a full update makes recycling safe.
+ */
+function parkIcons(slot: number): void {
   const base = slot * PARTS;
-  // CHILDREN FIRST — walk the parts BACKWARDS.
-  //
-  // The glow model is bone-merged onto the relay (`FollowEntity`), so the relay is its parent. Ascending
-  // order destroyed the relay (part 2) before the model (part 3), leaving clients holding a child whose
-  // parent had just been deleted — which is precisely what `CopyExistingEntity: missing client entity N`
-  // reports. A Traitor kill runs this on the victim, and that is when clients were hard-crashing.
-  //
-  // The two worldtext panels are parented to the PAWN, which outlives them, so their order never
-  // mattered; only the glow pair has a parent inside this set.
   for (let i = PARTS - 1; i >= 0; i--) {
     const ent = icons[base + i];
     if (ent === null) continue;
-    // ENTITY-INDEX TRACE. `CopyExistingEntity: missing client entity N` is the client being told to
-    // build an entity from an existing one it never received. A transmit-FILTERED entity is exactly
-    // that: hidden clients never got it. If its index is then freed and REUSED by something visible,
-    // the client is asked to copy from a ghost. Logging indices on both sides lets the number in the
-    // next crash be checked against what we destroyed just before.
+    if (!ent.isValid()) {
+      icons[base + i] = null;
+      continue;
+    }
+    // Visible to nobody. Not `Transmit.reset`, which would hand them back to everyone.
+    Transmit.setVisibleTo(ent, []);
+  }
+}
+
+/**
+ * Destroy `slot`'s markers for real. Round boundaries and teardown only — never mid-round.
+ *
+ * Children first (the glow follows the relay, the relay follows the pawn), so a parent never dies
+ * under a live child.
+ */
+function destroyIcons(slot: number): void {
+  const base = slot * PARTS;
+  for (let i = PARTS - 1; i >= 0; i--) {
+    const ent = icons[base + i];
+    if (ent === null) continue;
     console.log(`[ttt] ENTTRACE free icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
-    // Release the rule before the entity so the native table does not carry a dead entry.
-    Transmit.reset(ent);
+    // Removed while still filtered — see the note above.
     ent.remove();
     icons[base + i] = null;
   }
@@ -621,7 +644,9 @@ function tagAllRoles(): void {
 
 /** Destroy every icon and forget the round's visibility state (the C# `OnRoundStart`). */
 function clearAllIcons(): void {
-  for (let slot = 0; slot < MAX_SLOTS; slot++) removeIcons(slot);
+  // The one place markers are actually DESTROYED: a round boundary or teardown, where the engine sends
+  // a full update and index recycling is safe again. Mid-round the parked (hidden) entities are kept.
+  for (let slot = 0; slot < MAX_SLOTS; slot++) destroyIcons(slot);
   traitors.length = 0;
   revealed.fill(0);
 }
@@ -665,7 +690,9 @@ export function installIcons(bus: EventBus<TttEvents>): void {
 
       if (role === RoleId.None || role === RoleId.Spectator) return;
 
-      removeIcons(slot); // in case this is a re-assignment
+      // A deal happens at a round boundary, so destroying here is safe and keeps the pool from growing:
+      // last round's parked markers go now, and this round's are built fresh below.
+      destroyIcons(slot);
       // Recorded before the panels exist: every Traitor is dealt in this same frame, so by the
       // time the deferred spawns run the set is complete and one refresh covers all of them.
       // Bounded at 64 because `setVisibleTo` throws RangeError on a viewer outside [0, 64).
@@ -673,6 +700,7 @@ export function installIcons(bus: EventBus<TttEvents>): void {
         traitors.push(slot);
       }
       applyRoleVisuals(slot, role, 1);
+
     },
     // MONITOR so the icon shows the role karma may have rewritten, not the one first dealt.
     { priority: Priority.MONITOR },

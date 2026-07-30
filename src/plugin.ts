@@ -39,7 +39,7 @@
 import { plugin } from "@s2script/sdk/plugin";
 import { Server } from "@s2script/sdk/server";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
-import { GameState, Team } from "./core/enums";
+import { GameState, RoleId, Team } from "./core/enums";
 import { EventBus, Priority } from "./core/bus";
 import type { TttEvents } from "./core/events";
 import { registerCvars, refresh, cfg } from "./core/cvars";
@@ -55,16 +55,17 @@ import { logPurchase, logRoleAssigned } from "./game/logger";
 import { clearReservedRoles, roleName } from "./game/roles";
 
 import {
-  installMatchStats, invalidatePawnCache, onDamage, onDeathPre, onPlayerHurt, onSpawn, setDeathBus,
+  installDeathFeedSuppressor, installMatchStats, invalidatePawnCache, onDamage, onDeathPre,
+  onPlayerHurt, onSpawn, setDeathBus,
 } from "./cs2/combat";
 import { clearBodies, precacheBodyModels } from "./cs2/bodies";
 import { initInteract, resetInteract, tickInteract } from "./cs2/interact";
 import { reassertSpoof, resetSpoof, tickSpoof } from "./cs2/spoof";
 import { installFeedback } from "./cs2/feedback";
-import { wouldRefuseTeam } from "./game/teams";
+import { clearBenched, wouldRefuseTeam } from "./game/teams";
 import { installIcons, precacheRoleModels, resetIcons } from "./cs2/icons";
 import {
-  handleChat, installBombSuppressor, installHandlers, onItemPurchase, onTeamChange,
+  benchLateJoiner, handleChat, installBombSuppressor, installHandlers, onItemPurchase, onTeamChange,
   removeBuyZones, resetBuyZones, setSelfSpectateHandler, tickHandlers, unmuteAll,
 } from "./cs2/handlers";
 
@@ -87,7 +88,7 @@ import {
 } from "./shop/weaponfx";
 
 import { resetHud, tickHud } from "./cs2/hud";
-import { registerCommands } from "./commands";
+import { onPlayerPing, registerCommands, resetShopMenus } from "./commands";
 
 /**
  * Load an operator-supplied phrase file, if `phrases_file` names one. It is a flat
@@ -151,6 +152,10 @@ function applyServerSettings(): void {
   Server.command("mp_match_can_clinch 0");
   Server.command("mp_autoteambalance 0"); // teams are a TTT implementation detail
   Server.command("mp_limitteams 0");
+  // NOT set here: `mp_respawn_on_death_t/ct`. Those are a TTT-owned TOGGLE, flipped per round state by
+  // `setEngineRespawnAllowed` in game.ts — the engine refuses `Respawn` while they are off, and leaving
+  // them on would respawn players the instant they die mid-round. Re-asserting either value from here
+  // would fight that.
 }
 
 export default plugin((ctx) => {
@@ -179,6 +184,10 @@ export default plugin((ctx) => {
   // combat.ts self-installs on the first death, but wiring it here also catches the round-start
   // scoreboard clear that happens before anyone has died.
   installMatchStats(bus);
+  // Installed HERE, in the load window — not lazily from the death hook. A `UserMessages.onPre`
+  // subscribe made from inside a game-event dispatch never took effect (measured: 40 death windows,
+  // zero invocations), and this is what hides the kill feed.
+  installDeathFeedSuppressor();
   installFeedback(bus);
   installIcons(bus);
   // Ducking out to spectator mid-round counts as dying — it must not be a way to dodge a Traitor.
@@ -210,7 +219,12 @@ export default plugin((ctx) => {
   bus.on(
     "gameState",
     (ev) => {
-      if (ev.state !== GameState.InProgress) return;
+      if (ev.state !== GameState.InProgress) {
+        // A menu printed last round must not still be answerable this one: its numbering came from
+        // the old role and balance, so a stale digit would buy something the player never saw.
+        if (ev.state === GameState.Finished) resetShopMenus();
+        return;
+      }
       refresh();
       refreshItems();
     },
@@ -228,6 +242,15 @@ export default plugin((ctx) => {
     reg.addPlayer(client.slot, client.steamId, client.name);
     reg.setAlive(client.slot, reg.computeAlive(client.slot));
     bus.emit("join", { slot: client.slot });
+
+    // Bench a live-round arrival HERE, not only when they pick a team. A freshly connected
+    // controller sits on `Team.None` with no pawn, and the engine leaves its alive mirror set — so
+    // until they touched the team menu they read as ALIVE on every scoreboard while being unable to
+    // play. Waiting for `player_team` also never fires for a player who simply never chooses.
+    if (game.state === GameState.InProgress && reg.roleOf(client.slot) === RoleId.None) {
+      benchLateJoiner(client.slot);
+      return;
+    }
 
     // A player joining an idle server is what starts the first round.
     if (game.state === GameState.Waiting && reg.playerCount() >= cfg.minPlayers) startGame();
@@ -393,6 +416,19 @@ export default plugin((ctx) => {
   let lastTime = Server.gameTime;
   let endCheckAccum = 0;
 
+  // The alive-spoof re-assert runs in the POST phase, on its own subscription — everything else
+  // below is Pre.
+  //
+  // The controller's `m_bPawnIsAlive` is re-derived FROM the pawn by the controller's think, which
+  // runs during simulation. A write from the Pre phase therefore lands BEFORE that derivation and is
+  // overwritten by it, and the snapshot that goes out carries the real value — which is the
+  // scoreboard flicker. Writing in Post lands after the derivation and before the snapshot, so there
+  // is nothing left to overwrite it.
+  //
+  // This is what lets the spoof leave the pawn's own `lifeState` alone (see `tickSpoof`): the pawn
+  // write was only ever there to win this ordering fight, and it cost dead players their freecam.
+  ctx.server.onGameFrame(() => { tickSpoof(); }, { phase: "post" });
+
   ctx.server.onGameFrame(() => {
     const now = Server.gameTime;
     const dt = now - lastTime;
@@ -401,7 +437,6 @@ export default plugin((ctx) => {
     if (dt <= 0 || dt > 1) return;
 
     tickHandlers(dt);
-    tickSpoof();
     tickWaiting(dt);
     tickCountdown(dt);
     if (game.state !== GameState.InProgress) return;
@@ -445,6 +480,8 @@ export default plugin((ctx) => {
       resetInteract();
       resetSpoof();
       resetHud();
+      resetShopMenus();
+      clearBenched();
       // Drops the role icons and puts every tagged name back: an unload must not leave "[T] Bob".
       resetIcons();
     clearReservedRoles();

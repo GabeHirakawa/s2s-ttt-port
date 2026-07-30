@@ -214,6 +214,19 @@ const SPECS: readonly Spec[] = [
   // transmit-filtered entities at all, and a long session with icons (which use the same mechanism)
   // fully enabled produced none. Filtering is no longer the reason to keep this off, so it is on.
   S("sm_ttt_shop_tripwire_glow", "bool", true, "Traitor-only glow on placed Tripwires"),
+  // DEFAULTS OFF as a crash mitigation, not a preference.
+  //
+  // The DNA marker is a prop_dynamic PAIR chained with FollowEntity (glow -> relay -> target pawn) and
+  // BOTH halves are restricted to a single viewer with `Transmit.setVisibleTo`. That is a
+  // transmit-filtered entity whose parent is itself transmit-filtered — exactly the shape that leaves
+  // a client holding a handle to an entity it was never sent, which is what
+  // `CopyExistingEntity: missing client entity N` reports. Two crash indices from a live playtest
+  // (666, 670) fell in the gaps BETWEEN our traced entities, and crashes continued after role icons
+  // were disabled — this pair is untraced and independent of that switch, which fits both facts.
+  //
+  // The DNA scanner still works without it: the bearing/range/clock HUD and the identification are
+  // untouched. Only the through-wall outline on the killer is gone.
+  S("sm_ttt_dna_glow", "bool", false, "Through-wall glow marking the killer for the DNA scanner"),
   // --- crash bisect switches ---------------------------------------------------------------
   // Clients have hard-crashed with `CopyExistingEntity: missing client entity N`, which is what a
   // client says about an entity it was never sent. TRANSMIT FILTERING is the only mechanism here
@@ -269,7 +282,7 @@ const SPECS: readonly Spec[] = [
   // Applied when the round ENDS, not when roles are dealt: the pre-round window is when players arm
   // themselves off the map, and stripping at assignment took that away. The knife and any pistol are
   // always kept — see `stripToSidearms`.
-  S("sm_ttt_strip_on_assign", "bool", true, "Strip primaries/utility (keep knife + pistol) at round end"),
+  S("sm_ttt_strip_on_assign", "bool", true, "Strip primaries/utility (keep knife + pistol) at round end and on spawn"),
   S("sm_ttt_prop_pickup", "bool", true, "Allow players to carry props and bodies with USE"),
 ];
 
@@ -379,6 +392,7 @@ export const cfg = {
   roleHealth: new Int32Array(5),
   /** Armor by {@link RoleId} index. */
   roleArmor: new Int32Array(5),
+  dnaGlow: false,
   /** Starting weapons by {@link RoleId} index. */
   roleWeapons: [[], [], [], [], []] as string[][],
   /** Starting credits by {@link RoleId} index. */
@@ -416,6 +430,7 @@ function rebuild(): void {
   cfg.roleArmor[1] = n("sm_ttt_rolearmor_innocent");
   cfg.roleArmor[2] = n("sm_ttt_rolearmor_traitor");
   cfg.roleArmor[3] = n("sm_ttt_rolearmor_detective");
+  cfg.dnaGlow = b("sm_ttt_dna_glow");
   cfg.roleWeapons[1] = list("sm_ttt_roleweapons_innocent");
   cfg.roleWeapons[2] = list("sm_ttt_roleweapons_traitor");
   cfg.roleWeapons[3] = list("sm_ttt_roleweapons_detective");

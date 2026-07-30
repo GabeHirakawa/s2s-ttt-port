@@ -26,7 +26,7 @@ import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { ChatColors, wrapEntity } from "@s2script/cs2";
 import { roleModel } from "../cs2/icons";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
-import { n, s } from "../core/cvars";
+import { cfg, n, s } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
@@ -395,13 +395,15 @@ function packGlow(r: number, g: number, b: number): number {
 function clearDnaGlow(slot: number): void {
   const model = dnaGlowModel[slot];
   if (model !== null) {
-    Transmit.reset(model);
+    // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
+    // broadcasts a dying hidden entity to every client for one snapshot.
     model.remove();
     dnaGlowModel[slot] = null;
   }
   const relay = dnaGlowRelay[slot];
   if (relay !== null) {
-    Transmit.reset(relay);
+    // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
+    // broadcasts a dying hidden entity to every client for one snapshot.
     relay.remove();
     dnaGlowRelay[slot] = null;
   }
@@ -415,6 +417,9 @@ function clearDnaGlow(slot: number): void {
  */
 function spawnDnaGlow(viewer: number, target: number): void {
   clearDnaGlow(viewer);
+  // See `sm_ttt_dna_glow`: this pair is the standing suspect for the client-side
+  // `CopyExistingEntity` fatals, and it is off by default until that is settled.
+  if (!cfg.dnaGlow) return;
   const pawn = pawnOf(target);
   if (pawn === null || !pawn.isValid) return;
   const model = roleModel(reg.roleOf(target));
@@ -445,9 +450,11 @@ function spawnDnaGlow(viewer: number, target: number): void {
 
   const only = [viewer];
   if (!Transmit.setVisibleTo(relay, only) || !Transmit.setVisibleTo(glow, only)) {
-    Transmit.reset(glow);
+    // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
+    // broadcasts a dying hidden entity to every client for one snapshot.
     glow.remove();
-    Transmit.reset(relay);
+    // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
+    // broadcasts a dying hidden entity to every client for one snapshot.
     relay.remove();
     return;
   }
