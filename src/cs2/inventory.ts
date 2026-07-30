@@ -13,6 +13,7 @@
 import { CsItem } from "@s2script/cs2";
 import type { Weapon } from "@s2script/cs2";
 import { pawnOf } from "./pawn";
+import { nextFrame } from "@s2script/sdk/timers";
 
 /**
  * A held weapon. Alias of the SDK's `Weapon`, kept as a name the rest of the port already uses.
@@ -237,6 +238,83 @@ export function clearSlot(slot: number, gearSlot: GearSlot): number {
     if (slotOfDef(weaponDef(w)) === gearSlot && pawn.removeWeapon(w)) removed++;
   }
   return removed;
+}
+
+/**
+ * Remove every held weapon whose item-definition index is `def`. Returns how many were removed.
+ *
+ * Matching on the DEFINITION INDEX, not on a class name: `weaponClass(w)` returns `""` on this
+ * runtime, so any `weaponClass(w) === "weapon_x"` comparison silently never matches. A caller that
+ * meant to replace a weapon therefore removed nothing and simply added a second one — and because
+ * the engine allows only one taser, the surplus was dropped on the floor.
+ */
+export function removeByDef(slot: number, def: number): number {
+  const pawn = pawnOf(slot);
+  if (pawn === null || !pawn.isValid) return 0;
+  let removed = 0;
+  const held = pawn.weapons as HeldWeapon[];
+  for (let i = 0; i < held.length; i++) {
+    const w = held[i]!;
+    if (weaponDef(w) === def && pawn.removeWeapon(w)) removed++;
+  }
+  return removed;
+}
+
+/** CS2 item-definition index for `weapon_taser`. */
+export const TASER_DEF = 31;
+
+/**
+ * Free a gear slot, then hand over `className` on the FOLLOWING frame.
+ *
+ * `removeWeapon` does not free the inventory slot within the same frame — the engine completes the
+ * removal later — so a `clearSlot(...)` immediately followed by a `give(...)` still hands the weapon
+ * to a player whose slot is occupied, and the engine drops the surplus on the floor. That is how
+ * buying the one-shot Revolver put it at the Detective's feet instead of in their hand, and how the
+ * Taser produced one in hand and a second on the ground.
+ *
+ * A frame is imperceptible to the player and is the same trick `applyLoadout` already uses when a
+ * role change respawns the pawn out from under a loadout write.
+ */
+export function replaceInSlot(
+  slot: number,
+  gearSlot: GearSlot,
+  className: string,
+  clip?: number,
+  reserve?: number,
+): void {
+  clearSlot(slot, gearSlot);
+  void nextFrame().then(() => {
+    give(slot, className, clip, reserve);
+  });
+}
+
+/**
+ * Hand over `classNames`, first freeing the slot each one will occupy.
+ *
+ * The rule for every shop weapon: a purchase REPLACES what the player is holding in that slot. The
+ * engine has nowhere to put a second weapon of the same kind and drops the surplus on the floor —
+ * which loses the buyer the thing they paid for and leaves a free weapon lying around for whoever
+ * walks past. That is how the one-shot Revolver, the silent AWP, the M4A1 bundle, the Taser and the
+ * Detective's starting revolver all ended up at their owner's feet.
+ *
+ * UTILITY is deliberately exempt: grenades and healthshots are consumables that stack to a limit, so
+ * "replace what you have" would mean buying a second grenade destroyed the first.
+ *
+ * The give is deferred one frame because `removeWeapon` does not release the slot until then — the
+ * half of the fix that is easy to miss, since clearing alone looks correct.
+ */
+export function giveReplacing(slot: number, classNames: readonly string[]): void {
+  if (classNames.length === 0) return;
+  const seen = new Set<GearSlot>();
+  for (let i = 0; i < classNames.length; i++) {
+    const gear = slotOf(resolveWeapon(classNames[i]!));
+    if (gear === GearSlot.Utility || seen.has(gear)) continue;
+    seen.add(gear);
+    clearSlot(slot, gear);
+  }
+  void nextFrame().then(() => {
+    for (let i = 0; i < classNames.length; i++) give(slot, classNames[i]!);
+  });
 }
 
 /** Strip every held weapon. */

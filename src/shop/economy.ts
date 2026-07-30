@@ -217,7 +217,9 @@ export function installEconomy(bus: EventBus<TttEvents>): void {
   // A successful tase pays out and deals no damage.
   bus.on("damage", (ev) => {
     if (game.state !== GameState.InProgress) return;
-    if (ev.attacker < 0 || ev.weapon !== "weapon_taser") return;
+    // Substring, for the same reason as the scan itself in effects.ts: `player_hurt` reports `taser`
+    // while the pre-hook reports `weapon_taser`, so equality misses the live path.
+    if (ev.attacker < 0 || !ev.weapon.includes("taser")) return;
     ev.canceled = true;
     addBalance(ev.attacker, 30, "Successful Tase");
   }, { priority: Priority.HIGH });

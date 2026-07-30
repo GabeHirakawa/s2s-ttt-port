@@ -23,6 +23,7 @@ import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
 import { Beam, Fade, wrapEntity, type BeamHandle } from "@s2script/cs2";
 import { hudLine, HUD_FONT_BIG, HUD_FONT_SMALL, setCenterHud } from "../cs2/hud";
 import { Server } from "@s2script/sdk/server";
+import { nextFrame } from "@s2script/sdk/timers";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { b, n, s } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
@@ -33,7 +34,7 @@ import { pawnOf, setHealth, tell } from "../cs2/pawn";
 import { colorCorpse, ROLE_COLORS, setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
 import { restrictToTraitors } from "../cs2/icons";
 import {
-  give, resolveWeapon, weaponClass, KNIVES, PISTOLS, RIFLES, type HeldWeapon,
+  give, removeByDef, resolveWeapon, TASER_DEF, weaponClass, KNIVES, PISTOLS, RIFLES, type HeldWeapon,
 } from "../cs2/inventory";
 import { allBodies, type Body } from "../cs2/bodies";
 // Closes a module cycle (`combat` -> `handlers` -> `effects`). Safe: every edge is a hoisted
@@ -85,7 +86,6 @@ const otherSlots: number[] = [];
 
 // ── per-player item state ────────────────────────────────────────────────────
 /** Owns a Taser (its damage is converted into a role scan). */
-const hasTaser = new Uint8Array(MAX_SLOTS);
 /** Owns Stickers: tasing someone reveals their role to everyone. */
 const hasStickers = new Uint8Array(MAX_SLOTS);
 /** Owns a DNA Scanner. */
@@ -301,16 +301,19 @@ let activeC4 = 0;
  * player who has spent their charge pays again and gets nothing back.
  */
 export function grantTaser(slot: number): void {
-  hasTaser[slot] = 1;
   const pawn = pawnOf(slot);
   if (pawn === null || !pawn.isValid) return;
   const cls = resolveWeapon(s("sm_ttt_shop_taser_weapon"));
-  const held = pawn.weapons as HeldWeapon[];
-  for (let i = 0; i < held.length; i++) {
-    const w = held[i]!;
-    if (weaponClass(w) === cls) pawn.removeWeapon(w);
-  }
-  give(slot, cls);
+  // Matched by DEFINITION INDEX. This compared `weaponClass(w) === cls`, and `weaponClass` returns
+  // "" on this runtime — so the old taser was never removed and `give` added a SECOND one. Only one
+  // taser can be held, so the engine dropped the surplus: buying one taser produced one in hand and
+  // one on the floor for anybody to pick up.
+  removeByDef(slot, TASER_DEF);
+  // Deferred a frame: the removal does not free the slot until then, so a same-frame give produced a
+  // taser in hand AND one on the floor.
+  void nextFrame().then(() => {
+    give(slot, cls);
+  });
 }
 /** Grant Stickers. */
 export function grantStickers(slot: number): void { hasStickers[slot] = 1; }
@@ -457,12 +460,12 @@ export function isCamouflaged(slot: number): boolean {
  * decoration model will not spawn on this map the station is still placed and still works. The C#
  * version aborted the whole purchase if the entity failed.
  */
-export function placeStation(slot: number, increment: number, budget?: number): void {
+export function placeStation(slot: number, increment: number, budget?: number): boolean {
   const pawn = pawnOf(slot);
-  if (pawn === null) return;
+  if (pawn === null) return false;
   const hit = pawn.aimTrace({ distance: 128, mask: TraceMask.WorldOnly });
   const at = hit?.endPos ?? pawn.origin;
-  if (at === null || at === undefined) return;
+  if (at === null || at === undefined) return false;
 
   // The script owns the station's health the way `StationInfo.Health` did: `shootStation` takes it
   // down per bullet and fires `AcceptInput("Kill")` at zero.
@@ -504,6 +507,7 @@ export function placeStation(slot: number, increment: number, budget?: number): 
     z,
     timer: 0,
   });
+  return true;
 }
 
 /** Apply station effects. `dt` is elapsed seconds. */
@@ -911,10 +915,19 @@ function detonateTripwire(tw: Tripwire): void {
     if (pawn === null) continue;
     const o = pawn.origin;
     if (o === null) continue;
-    // Measured from the ANCHOR the wire was pinned to (`TripwireInstance.StartPos`), not from the
-    // middle of its span.
-    const dx = o.x - tw.ax, dy = o.y - tw.ay, dz = o.z - tw.az;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    // Measured from the nearest point on the WIRE, not from the anchor it was pinned to.
+    //
+    // The C# measured from `TripwireInstance.StartPos` — one end — and this ported that faithfully.
+    // It only behaves while wires are short: the falloff is steep (~118 damage at 142u, ~11 by
+    // 300u), so on a wire spanning a doorway the far half of the span barely scratches anyone. It
+    // was measured on a live server — a player standing ON the wire, 142u along it, took 59 and
+    // walked away; a second crossing at 168u took 40. A trap that is lethal at one end and
+    // cosmetic at the other is not a trap.
+    //
+    // Distance to the SEGMENT makes the whole length equally dangerous, which is what the wire looks
+    // like it does and what a player crossing it expects. The same helper already decides whether the
+    // wire was tripped at all, so trip and damage now agree on what "near the wire" means.
+    const dist = Math.sqrt(distToSegmentSq(o.x, o.y, o.z + 36, tw.ax, tw.ay, tw.az, tw.bx, tw.by, tw.bz));
 
     // Exponential decay (`getDamage`). A hyperbolic curve looks similar at the wire and is wildly
     // wrong past it: at stock power/falloff this is ~223 damage at 100u and single digits by 300u,
@@ -1266,7 +1279,6 @@ export function tickEffects(dt: number): void {
 
 /** Clear every per-round item flag and remove placed objects. */
 export function resetEffects(): void {
-  hasTaser.fill(0);
   hasStickers.fill(0);
   hasDna.fill(0);
   hasRevolver.fill(0);
@@ -1308,17 +1320,40 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
   eventBus.on(
     "damage",
     (ev) => {
-      if (!inProgress() || ev.attacker < 0 || ev.canceled) return;
+      if (!inProgress() || ev.attacker < 0) return;
       const attacker = ev.attacker;
       const victim = ev.slot;
 
-      // Taser: no damage, reveals the victim's role to the shooter (and everyone, with Stickers).
+      // The Taser is checked BEFORE the `canceled` guard below, because a canceled tase is the
+      // NORMAL case: `@s2script`-side, `economy.ts` subscribes at Priority.HIGH to pay out
+      // "Successful Tase" and cancels the damage there — so by the time this listener ran, `canceled`
+      // was already true and the early return skipped the reveal entirely. The player got the payout
+      // message and never learned the role, which is exactly the bug. Cancellation is what a tase is
+      // SUPPOSED to do, so it must not suppress the scan.
       //
       // The cancel must survive the `player_hurt` fallback path, where the hit has ALREADY landed:
       // if it took the victim below zero they are dead before anything can refund it, and the
       // "scan" would have killed the person it is meant to identify. Force them back to a safe
       // floor as well as cancelling, so a tase is never lethal.
-      if (ev.weapon === "weapon_taser" && hasTaser[attacker] === 1) {
+      // SUBSTRING match, not equality. The weapon string's shape depends on which path delivered the
+      // damage: the entity pre-hook reports the class (`weapon_taser`) while the `player_hurt`
+      // fallback reports the engine's short name (`taser`) — and the fallback is the live path here.
+      // An `=== "weapon_taser"` test therefore silently never matched a real tase, so the scan
+      // reported nothing at all. The C# guarded with `Contains("taser")` for exactly this reason, and
+      // `icons.ts` already uses `includes` on the same event.
+      // Gated on the WEAPON only, never on an "owns the taser" flag.
+      //
+      // This required `hasTaser[attacker] === 1`, and the flag is per-round state cleared by
+      // `resetEffects` — so it went to zero on every plugin reload and every round boundary, while the
+      // taser stayed in the player's hands. Measured on a live server: a real tase arrived with
+      // `hasTaser=0` and the reveal was skipped, yet `economy.ts` (which checks only the weapon
+      // string) still paid out "Successful Tase". A tase that pays credits and reveals nothing is the
+      // worst of both.
+      //
+      // The C# `TaserListenCanceler` has no such flag: it reveals for any hit whose weapon contains
+      // "taser" and lets HOLDING one be the gate, which is also what makes a taser picked up off the
+      // ground behave the same as a bought one.
+      if (ev.weapon.includes("taser")) {
         ev.canceled = true;
         const pawn = pawnOf(victim);
         const hp = pawn?.health ?? 0;
@@ -1331,6 +1366,9 @@ export function installEffects(eventBus: EventBus<TttEvents>): void {
         }
         return;
       }
+
+      // Everything past this point is real damage handling, which a cancel legitimately voids.
+      if (ev.canceled) return;
 
       // One-Shot Revolver: an instant kill, or suicide on a teammate.
       //

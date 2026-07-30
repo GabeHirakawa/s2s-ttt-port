@@ -16,7 +16,8 @@ import { n, list, s as str } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
 import { giveArmorWithHelmet } from "../cs2/handlers";
 import { armStickers } from "../cs2/icons";
-import { clearSlot, GearSlot, give } from "../cs2/inventory";
+import { clearSlot, GearSlot, give, giveReplacing, replaceInSlot } from "../cs2/inventory";
+import { nextFrame } from "@s2script/sdk/timers";
 import { tell } from "../cs2/pawn";
 import { register, type ShopItem, PurchaseResult } from "./shop";
 import * as fx from "./effects";
@@ -70,11 +71,14 @@ export function registerItems(): void {
 
   register(
     item("m4a1", "SHOP_ITEM_M4A1", "SHOP_ITEM_M4A1_DESC", RoleId.None, "sm_ttt_shop_m4a1_price", (slot) => {
+      // `sm_ttt_shop_m4a1_clear_slots` is an OPERATOR extra — slots to empty beyond the ones this
+      // bundle needs. The bundle's own slots are freed by `giveReplacing` regardless, so an empty or
+      // mis-set cvar can no longer cause the purchase to be dropped on the floor.
       for (const raw of list("sm_ttt_shop_m4a1_clear_slots")) {
         const idx = parseInt(raw, 10);
         if (Number.isFinite(idx)) clearSlot(slot, idx as GearSlot);
       }
-      for (const weapon of list("sm_ttt_shop_m4a1_weapons")) give(slot, weapon);
+      giveReplacing(slot, list("sm_ttt_shop_m4a1_weapons"));
     }),
   );
 
@@ -90,8 +94,9 @@ export function registerItems(): void {
   // ── detective ─────────────────────────────────────────────────────────────
   register(
     item("deagle", "SHOP_ITEM_DEAGLE", "SHOP_ITEM_DEAGLE_DESC", RoleId.Detective, "sm_ttt_shop_onedeagle_price", (slot) => {
-      clearSlot(slot, GearSlot.Pistol);
-      give(slot, str("sm_ttt_shop_onedeagle_weapon"), 1, 0);
+      // Deferred by a frame — see `replaceInSlot`. A same-frame give landed while the pistol slot was
+      // still occupied and the engine dropped the revolver at the Detective's feet.
+      replaceInSlot(slot, GearSlot.Pistol, str("sm_ttt_shop_onedeagle_weapon"), 1, 0);
       fx.grantOneShotRevolver(slot);
     }, { limit: 1 }),
   );
@@ -115,7 +120,7 @@ export function registerItems(): void {
 
   register(
     item("healthstation", "SHOP_ITEM_STATION_HEALTH", "SHOP_ITEM_STATION_HEALTH_DESC", RoleId.Detective, "sm_ttt_shop_healthstation_price", (slot) => {
-      fx.placeStation(slot, n("sm_ttt_shop_healthstation_increments"));
+      return fx.placeStation(slot, n("sm_ttt_shop_healthstation_increments"));
     }),
   );
 
@@ -128,7 +133,7 @@ export function registerItems(): void {
   // ── traitor ───────────────────────────────────────────────────────────────
   register(
     item("c4", "SHOP_ITEM_C4", "SHOP_ITEM_C4_DESC", RoleId.Traitor, "sm_ttt_shop_c4_price", (slot) => {
-      give(slot, "weapon_c4");
+      giveReplacing(slot, ["weapon_c4"]);
       fx.grantC4();
       wfx.applyC4Fuse();
     }, {
@@ -168,9 +173,11 @@ export function registerItems(): void {
     item("silentawp", "SHOP_ITEM_SILENT_AWP", "SHOP_ITEM_SILENT_AWP_DESC", RoleId.Traitor, "sm_ttt_shop_silentawp_price", (slot) => {
       // Free the primary slot first, or the engine has nowhere to put the AWP and drops it at the
       // buyer's feet — which also means they never hold it, so its silenced-shot grant does nothing.
-      clearSlot(slot, GearSlot.Rifle);
-      give(
+      // The give is deferred a frame because the slot is not actually free until then; see
+      // `replaceInSlot`.
+      replaceInSlot(
         slot,
+        GearSlot.Rifle,
         "weapon_awp",
         n("sm_ttt_shop_silentawp_current_ammo"),
         n("sm_ttt_shop_silentawp_reserve_ammo"),
@@ -207,7 +214,7 @@ export function registerItems(): void {
 
   register(
     item("damagestation", "SHOP_ITEM_STATION_HURT", "SHOP_ITEM_STATION_HURT_DESC", RoleId.Traitor, "sm_ttt_shop_damagestation_price", (slot) => {
-      fx.placeStation(slot, n("sm_ttt_shop_damagestation_increments"));
+      return fx.placeStation(slot, n("sm_ttt_shop_damagestation_increments"));
     }, { limit: 3 }),
   );
 
@@ -219,7 +226,11 @@ export function registerItems(): void {
 
   register(
     item("tripwire", "SHOP_ITEM_TRIPWIRE", "SHOP_ITEM_TRIPWIRE_DESC", RoleId.Traitor, "sm_ttt_shop_tripwire_price", (slot) => {
-      if (!fx.placeTripwire(slot)) tell(slot, msgFor(slot, "SHOP_ITEM_TRIPWIRE_TOOFAR"));
+      // Returns false so `tryPurchase` refunds: refusing the placement AND keeping the credits is
+      // the worst of both, and "too far away" is a miss, not a purchase.
+      if (fx.placeTripwire(slot)) return true;
+      tell(slot, msgFor(slot, "SHOP_ITEM_TRIPWIRE_TOOFAR"));
+      return false;
     }),
   );
 }
