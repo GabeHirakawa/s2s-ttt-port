@@ -56,7 +56,7 @@
 import { Player, wrapEntity, type Pawn } from "@s2script/cs2";
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
-import { nextFrame } from "@s2script/sdk/timers";
+import { after, nextFrame } from "@s2script/sdk/timers";
 import { Transmit } from "@s2script/sdk/transmit";
 import { Priority, type EventBus } from "../core/bus";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
@@ -401,6 +401,28 @@ function parkIcons(slot: number): void {
 }
 
 /**
+ * Hide only the GLOW half of `slot`'s markers, leaving the worldtext panels up.
+ *
+ * The reveal glow answers "what am I this round?" and stops being useful within seconds; left on it
+ * turns a Traitor into a lit silhouette for the rest of the round. The panels are the part that has
+ * to persist — they are how Traitors keep identifying each other — so the two halves are separated
+ * here rather than parking the whole block.
+ *
+ * PARKED, never destroyed, for the reason in {@link parkIcons}: these entities are transmit-filtered,
+ * so freeing an index mid-round hands it to something every client does receive and crashes the ones
+ * that never had it.
+ */
+function parkGlow(slot: number): void {
+  const base = slot * PARTS;
+  for (const part of [PART_GLOW_MODEL, PART_GLOW_RELAY]) {
+    const ent = icons[base + part];
+    if (ent === null) continue;
+    if (!ent.isValid()) { icons[base + part] = null; continue; }
+    Transmit.setVisibleTo(ent, []);
+  }
+}
+
+/**
  * Destroy `slot`'s markers for real. Round boundaries and teardown only — never mid-round.
  *
  * Children first (the glow follows the relay, the relay follows the pawn), so a parent never dies
@@ -501,6 +523,15 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
       if (spawnIcons(slot, pawn, role)) {
         // A Detective icon gets NO rule: visible to everyone, late joiners included.
         if (role === RoleId.Traitor) refreshTraitorIcons();
+        // Fade the glow, keep the panel. Re-checked on expiry because a karma rewrite, a death or a
+        // whole new round can land inside the window — and `parkGlow` must not fire against markers
+        // that now belong to a different role.
+        const secs = cfg.roleGlowSeconds;
+        if (secs > 0) {
+          after(secs * 1000, () => {
+            if (reg.roleOf(slot) === role) parkGlow(slot);
+          });
+        }
       } else {
         console.log(`[ttt] WARN: icon spawn failed slot=${slot} role=${role}`);
       }

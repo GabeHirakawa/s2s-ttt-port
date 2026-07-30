@@ -226,6 +226,12 @@ const SPECS: readonly Spec[] = [
   //
   // The DNA scanner still works without it: the bearing/range/clock HUD and the identification are
   // untouched. Only the through-wall outline on the killer is gone.
+  // The role-reveal glow is a BRIEF confirmation of what you were just dealt, not a permanent
+  // outline. Left up all round it turns every Traitor into a lit target for anyone who happens to
+  // be looking at the right moment. The floating role marker is what persists — that is the
+  // traitor-buddy indicator — so fading the glow costs Traitors nothing in identifying each other.
+  // 0 disables the fade and restores the always-on behaviour.
+  S("sm_ttt_role_glow_seconds", "int", 4, "Seconds the role-reveal glow stays up (0 = never fade)", 0, 120),
   S("sm_ttt_dna_glow", "bool", false, "Through-wall glow marking the killer for the DNA scanner"),
   // --- crash bisect switches ---------------------------------------------------------------
   // Clients have hard-crashed with `CopyExistingEntity: missing client entity N`, which is what a
@@ -393,6 +399,7 @@ export const cfg = {
   /** Armor by {@link RoleId} index. */
   roleArmor: new Int32Array(5),
   dnaGlow: false,
+  roleGlowSeconds: 4,
   /** Starting weapons by {@link RoleId} index. */
   roleWeapons: [[], [], [], [], []] as string[][],
   /** Starting credits by {@link RoleId} index. */
@@ -431,6 +438,7 @@ function rebuild(): void {
   cfg.roleArmor[2] = n("sm_ttt_rolearmor_traitor");
   cfg.roleArmor[3] = n("sm_ttt_rolearmor_detective");
   cfg.dnaGlow = b("sm_ttt_dna_glow");
+  cfg.roleGlowSeconds = n("sm_ttt_role_glow_seconds");
   cfg.roleWeapons[1] = list("sm_ttt_roleweapons_innocent");
   cfg.roleWeapons[2] = list("sm_ttt_roleweapons_traitor");
   cfg.roleWeapons[3] = list("sm_ttt_roleweapons_detective");
