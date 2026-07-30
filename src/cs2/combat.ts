@@ -432,8 +432,25 @@ export function killWithGadget(
   // does, in the same order.
   handleDeath(bus, victim, killer, -1, weapon, false);
   clearGadgetKill(victim);
-  // Now make the engine agree. Last, so the pawn still has an origin while the corpse is placed.
-  pawnOf(victim)?.slay();
+  // Now make the engine agree — but on the NEXT FRAME, deliberately, and outside our own call stack.
+  //
+  // `slay` makes the engine fire `player_death` SYNCHRONOUSLY. Called from here it lands while the V8
+  // isolate is still borrowed by whichever handler drove the gadget (a damage hook, a poison tick),
+  // so the core's game-event pre-dispatch hits its re-entrancy guard, cannot run JS, and returns
+  // Continue. Our `player_death` hook never gets a say, `Events.setRecipients` is never called, and
+  // the engine broadcasts the death to every client — a Poison Shot kill showed up in the kill feed
+  // for every Innocent on the server, which is exactly the secret this mode is built on keeping.
+  //
+  // An earlier comment here read that a slay produces no receivable `player_death` at all. That was
+  // the right observation and the wrong conclusion: the event fires, our subscriber is just skipped.
+  // Deferring one frame drops the borrow, so the death dispatches normally and gets scoped like any
+  // engine kill. The extra frame costs nothing — the victim already reads as alive to everyone else
+  // through the spoof, and the corpse was placed above while the pawn still had an origin.
+  // Armed BEFORE the slay so the event it produces is recognised as already-handled. -2 records
+  // "handled, but nobody to credit", which must still be distinguishable from "not a gadget kill".
+  gadgetHandledKiller[victim] = killer >= 0 ? killer : -2;
+  const dying = victim;
+  void nextFrame().then(() => { pawnOf(dying)?.slay(); });
 }
 
 /**
@@ -507,6 +524,34 @@ function setDeathViewers(viewers: readonly number[]): void {
   }
 }
 
+/**
+ * Who is allowed to see a kill: the killer, plus their fellow Traitors when the killer is one.
+ *
+ * Shared by the engine-death path and the gadget hand-off below so the two cannot drift — a gadget
+ * kill leaking to a wider audience than a gunshot would be just as fatal to the mode.
+ */
+function viewersForKill(killer: number): number[] {
+  const viewers: number[] = [];
+  if (killer < 0) return viewers;
+  viewers.push(killer);
+  if (reg.roleOf(killer) !== RoleId.Traitor) return viewers;
+  const active = reg.activeSlots();
+  for (let i = 0; i < active.length; i++) {
+    const other = active[i]!;
+    if (other !== killer && reg.roleOf(other) === RoleId.Traitor) viewers.push(other);
+  }
+  return viewers;
+}
+
+/**
+ * Victims whose death `killWithGadget` has ALREADY fully processed, and the killer it credited.
+ *
+ * The engine event that follows the deferred slay is then a formality: every consequence has run, so
+ * it must be scoped and suppressed WITHOUT running them a second time. Without this the corpse, the
+ * karma adjustment and the win check would all fire twice for one gadget kill.
+ */
+const gadgetHandledKiller = new Int32Array(MAX_SLOTS).fill(-1);
+
 export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultValue | void {
   deathBus = bus;
   const victim = ev.getPlayerSlot("userid");
@@ -515,6 +560,19 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
   invalidatePawnCache();
   // Cheap idempotent guard; see `installMatchStats` for why the install is not left to the caller.
   installMatchStats(bus);
+
+  // A gadget kill that has already been processed in full: scope the feed, run nothing else.
+  //
+  // `killWithGadget` does every consequence itself and then slays the pawn a frame later, which is
+  // what produces THIS event. Falling through would spawn a second corpse, adjust karma twice and
+  // re-run the win check. The event is still worth handling rather than ignoring, because it is the
+  // one and only thing that decides who sees the kill feed entry.
+  if (gadgetHandledKiller[victim]! >= 0 || gadgetHandledKiller[victim] === -2) {
+    const credited = gadgetHandledKiller[victim]!;
+    gadgetHandledKiller[victim] = -1;
+    setDeathViewers(viewersForKill(credited < 0 ? -1 : credited));
+    return HookResult.Handled;
+  }
 
   // What the ENGINE reported. Kept separate from the repaired `killer` below — see
   // `rollbackDeathStats` for why the stat bookkeeping must run off this one and not off that one.
@@ -589,17 +647,7 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
   //
   // This replaces a loop that re-fired a hand-rebuilt copy of the event to each Traitor. That copy
   // could only ever carry the fields we thought to include, and it double-entered the killer's feed.
-  const viewers: number[] = [];
-  if (killer >= 0) {
-    viewers.push(killer);
-    if (reg.roleOf(killer) === RoleId.Traitor) {
-      const active = reg.activeSlots();
-      for (let i = 0; i < active.length; i++) {
-        const other = active[i]!;
-        if (other !== killer && reg.roleOf(other) === RoleId.Traitor) viewers.push(other);
-      }
-    }
-  }
+  const viewers = viewersForKill(killer);
   // CONTAINED. A throw anywhere in here unwinds out of this pre-hook, so the handler never reaches its
   // `return HookResult.Handled` below — and `dispatch_game_event_pre` treats a throwing subscriber as
   // `Err(())` and drops its result SILENTLY, with no log. The chain then collapses to Continue, the
