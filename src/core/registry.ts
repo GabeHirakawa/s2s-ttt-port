@@ -14,6 +14,7 @@
 
 import { Player } from "@s2script/cs2";
 import { MAX_SLOTS, RoleId, Team } from "./enums";
+import { LIFE_ALIVE } from "../cs2/pawn";
 
 /** Per-slot role for the current round. */
 const roles = new Uint8Array(MAX_SLOTS);
@@ -227,7 +228,14 @@ export function computeAlive(slot: number): boolean {
   const team = p.teamNum ?? Team.None;
   if (team !== Team.Terrorist && team !== Team.CounterTerrorist) return false;
   const pawn = p.pawn;
-  return pawn !== null && (pawn.health ?? 0) > 0;
+  if (pawn === null) return false;
+  // BOTH `lifeState` and health. A positive health reading alone is not liveness: a controller that
+  // has a pawn but has never SPAWNED carries the default 100 health with `lifeState` still LIFE_DEAD,
+  // so a health-only test reported every un-spawned bot as alive. `eligible()` then dealt them roles,
+  // and a round went live with most of its participants dead on the floor — Traitors included, which
+  // the win check counts and nobody can kill.
+  if (pawn.lifeState !== LIFE_ALIVE) return false;
+  return (pawn.health ?? 0) > 0;
 }
 
 /** Recompute every cached alive flag from the engine (round boundaries, after mass respawns). */

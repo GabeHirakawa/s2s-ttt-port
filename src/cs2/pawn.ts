@@ -166,7 +166,7 @@ export function respawn(slot: number): boolean {
  * correcting it a frame later is what the scoreboard flicker actually is. Writing the pawn's own
  * state instead means the mirror derives "alive" by itself and there is nothing to fight.
  */
-const LIFE_ALIVE = 0;
+export const LIFE_ALIVE = 0;
 /** `LIFE_DEAD` — what the engine sets on a real death, and what the illusion has to put back. */
 const LIFE_DEAD = 2;
 

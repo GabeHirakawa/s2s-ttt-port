@@ -14,7 +14,7 @@
  *    and a fresh logger. Rounds here mutate module state and reset it.
  */
 
-import { delay } from "@s2script/sdk/timers";
+import { delay, nextFrame } from "@s2script/sdk/timers";
 import { Server } from "@s2script/sdk/server";
 import { GameRules, RoundEndReason, Teams } from "@s2script/cs2";
 import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
@@ -26,7 +26,7 @@ import type { TttEvents } from "../core/events";
 import { assignRoles, revealTraitorBuddies, roleName, stripRoundWeapons } from "./roles";
 import { clearLog, printLogs } from "./logger";
 import { clearBodies } from "../cs2/bodies";
-import { isPlayingTeam, respawn, restoreFullHealth, setPawnIsAlive, tellAll } from "../cs2/pawn";
+import { isPlayingTeam, pawnOf, respawn, restoreFullHealth, setPawnIsAlive, teamOf, tellAll } from "../cs2/pawn";
 import { resetTeamsToT, revealAllRoles } from "./teams";
 import { setSpoofingEnabled } from "../cs2/spoof";
 
@@ -60,6 +60,28 @@ let engineEndedRound = false;
  * rather than a slow one.
  */
 const FINISHED_TIMEOUT = 10;
+
+/**
+ * The engine's own respawn permission.
+ *
+ * `CCSPlayerController::Respawn` HONOURS the gamemode's respawn rules: with these off it silently
+ * no-ops, leaving the controller holding a pawn that was built but never placed in the world
+ * (`lifeState = LIFE_DEAD`, `health = 100`). Measured on a live server — `respawn()` reported success
+ * once a second for a whole 15-second countdown while the player stayed dead on the floor, and only
+ * players spawned by the ENGINE's own round restart (which obeys no such rule) ever came alive. That
+ * is why "you had to be connected before the round ended" to get spawned.
+ *
+ * So TTT owns the setting rather than leaving it to the config, and it MUST be a toggle: left on, a
+ * player who dies mid-round respawns instantly, which is the one thing this mode cannot allow.
+ *
+ * ON for WAITING/COUNTDOWN, so everyone can be put into the world. OFF the moment the round goes
+ * live, so death is permanent.
+ */
+function setEngineRespawnAllowed(on: boolean): void {
+  const v = on ? "1" : "0";
+  Server.command(`mp_respawn_on_death_t ${v}`);
+  Server.command(`mp_respawn_on_death_ct ${v}`);
+}
 
 /** Wire the module to the plugin's bus. Call once from the factory. */
 export function initGame(eventBus: EventBus<TttEvents>): void {
@@ -153,6 +175,10 @@ export function startGame(quiet = false): void {
   // round's revealed Innocents are still sitting on CT, and the ticker is not guaranteed to run
   // before roles are dealt (a one-second countdown, or a frame the shared handler dropped because
   // `dt > 1`). Whoever joins or gets revealed later is caught by the ticker as before.
+  // BEFORE the respawn loop below: the engine refuses a respawn while this is off, so enabling it
+  // afterwards would let the first batch of spawns be silently dropped.
+  setEngineRespawnAllowed(true);
+
   resetTeamsToT();
 
   // Everyone on a playing team but currently dead gets put back in play for the coming round.
@@ -168,9 +194,57 @@ export function startGame(quiet = false): void {
   });
 }
 
-/** Deal roles and go live. */
-function beginRound(): void {
+/**
+ * How many extra frames {@link beginRound} will wait for a queued respawn to land.
+ *
+ * `Player.respawn` takes effect a frame or two later, so a player respawned in the same breath as the
+ * liveness check still reads as dead. Excluding them was the wrong answer — someone who connected
+ * during the countdown must be ALIVE when the round starts, not benched for arriving late. Waiting a
+ * few frames is imperceptible (~50ms at 64 tick) and is the difference between "we asked the engine
+ * to spawn them" and "they are actually in the round".
+ */
+const SPAWN_SETTLE_FRAMES = 4;
+
+/**
+ * Deal roles and go live.
+ *
+ * The invariant: EVERY player dealt a role is alive at the moment the round goes live. Anyone on a
+ * playing team who is still dead is respawned and the round WAITS for them (up to
+ * {@link SPAWN_SETTLE_FRAMES}) rather than starting without them.
+ */
+function beginRound(attempt = 0): void {
   reg.resyncAlive();
+
+  // Respawn anyone on a playing team who is still dead. The countdown ticker already tries this every
+  // second, but it is best-effort: a player who connected in the last second, or died in it, reaches
+  // here dead — and dealing a role to a dead player produced a round whose participants were lying on
+  // the floor before it began, Traitors included, which the win check counts and nobody can kill.
+  const active = reg.activeSlots();
+  let pending = 0;
+  for (let i = 0; i < active.length; i++) {
+    const slot = active[i]!;
+    if (reg.isAlive(slot) || !isPlayingTeam(slot)) continue;
+    respawn(slot);
+    pending++;
+  }
+  reg.resyncAlive();
+
+  // A spawn is still in flight — come back next frame rather than starting the round without them.
+  // Bounded, so a player the engine simply refuses to spawn cannot stall the round forever; after the
+  // last attempt the round starts with whoever IS alive.
+  if (pending > 0 && attempt < SPAWN_SETTLE_FRAMES) {
+    const mine = epoch;
+    void nextFrame().then(() => {
+      if (mine !== epoch || game.state !== GameState.Countdown) return;
+      beginRound(attempt + 1);
+    });
+    return;
+  }
+
+  // Spawns have landed (or the settle budget is spent), so close the window: from here on a death is
+  // permanent. Done BEFORE roles are dealt so no participant can be respawned by the engine.
+  setEngineRespawnAllowed(false);
+
   const pool = eligible(poolBuffer);
 
   if (pool.length < cfg.minPlayers) {
@@ -416,6 +490,9 @@ export function onEngineRoundEnd(): void {
 /** Drop back to WAITING and queue the next round if the server is populated enough for one. */
 function returnToWaiting(): void {
   game.state = GameState.Waiting;
+  // Idle: nobody is playing a round, so spawning freely is correct and it means a player who joins an
+  // empty server is put in the world instead of watching from the floor.
+  setEngineRespawnAllowed(true);
   syncRosterAndAnnounce();
   reg.resyncAlive();
   if (reg.playerCount() >= cfg.minPlayers) startGame();
@@ -483,12 +560,20 @@ export function tickCountdown(dt: number): void {
   // to CT when roles are dealt. Done through the countdown rather than once, so a late joiner or a
   // player revealed last round is still put back before assignment.
   resetTeamsToT();
+
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
-    if (!isPlayingTeam(slot)) continue;
+    if (!isPlayingTeam(slot)) {
+      console.log(`[ttt] SPAWNDIAG slot=${slot} SKIPPED team=${teamOf(slot)} alive=${reg.isAlive(slot)}`);
+      continue;
+    }
     if (!reg.isAlive(slot)) {
-      respawn(slot);
+      const ok = respawn(slot);
+      const pw = pawnOf(slot);
+      console.log(`[ttt] SPAWNDIAG slot=${slot} respawn=${ok} team=${teamOf(slot)} `
+        + `engineAlive=${reg.computeAlive(slot)} pawn=${pw === null ? "null" : "yes"} `
+        + `lifeState=${pw?.lifeState ?? -1} hp=${pw?.health ?? -1}`);
       continue;
     }
     // Alive already — which means they carried last round's health, armor and inflated max health

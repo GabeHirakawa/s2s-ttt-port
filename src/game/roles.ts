@@ -17,7 +17,7 @@ import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { setArmor, setHealth, tell, toSpectator } from "../cs2/pawn";
-import { give, stripToSidearms } from "../cs2/inventory";
+import { clearSlot, give, resolveWeapon, slotOf, stripToSidearms } from "../cs2/inventory";
 import { applyRoleTeam } from "./teams";
 import { nextFrame } from "@s2script/sdk/timers";
 
@@ -118,6 +118,22 @@ function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: num
     pool[pick] = pool[pool.length - 1]!;
     pool.pop();
 
+    // HARD GATE: a role never goes to a player who is not alive, checked against the ENGINE and not
+    // against a cached flag.
+    //
+    // Everything upstream tries to guarantee this — the countdown ticker respawns, `beginRound` waits
+    // for spawns to settle, `eligible` filters on liveness — and it still happened: a player who was
+    // dead when the round ended was dealt a role anyway. Any of those can be wrong (a cached flag that
+    // drifted, a respawn the engine refused, a death in the last frame), so the invariant is enforced
+    // HERE, at the one place that hands out roles, where nothing can get past it.
+    //
+    // `continue` without counting the deal, so the quota is filled by someone who IS alive rather than
+    // silently shrinking the round — the same discipline as a vetoed assignment below.
+    if (!reg.computeAlive(slot)) {
+      reg.setAlive(slot, false);
+      continue;
+    }
+
     const ev = bus.emit("roleAssign", { slot, role, canceled: false });
     if (ev.canceled) continue;
 
@@ -187,8 +203,23 @@ export function applyLoadout(slot: number, role: RoleId): void {
   // zeroes it; this is what makes a role with armor configured still get it.
   setArmor(slot, cfg.roleArmor[role]!);
 
+  // Free each destination slot BEFORE handing anything over, then give on the following frame.
+  //
+  // This was a bare `give` loop, and a player reaching role assignment is rarely empty-handed — they
+  // spawn with a pistol and knife, and the pre-round window is when they scavenge the map. The
+  // engine has nowhere to put a second weapon of the same kind, so it dropped it: the Detective's
+  // `weapon_revolver` landed at their feet every single round. Freeing the slot is not enough on its
+  // own either — `removeWeapon` does not release it until the next frame, which is why the give is
+  // deferred (the same reason `replaceInSlot` exists for the shop items).
   const weapons = cfg.roleWeapons[role]!;
-  for (let i = 0; i < weapons.length; i++) give(slot, weapons[i]!);
+  if (weapons.length === 0) return;
+  for (let i = 0; i < weapons.length; i++) clearSlot(slot, slotOf(resolveWeapon(weapons[i]!)));
+  void nextFrame().then(() => {
+    // Re-check the role: a karma timeout or an admin rewrite between the two frames must not arm
+    // someone for a role they no longer hold.
+    if (reg.roleOf(slot) !== role) return;
+    for (let i = 0; i < weapons.length; i++) give(slot, weapons[i]!);
+  });
 }
 
 /**

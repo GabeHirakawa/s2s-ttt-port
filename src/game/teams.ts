@@ -22,7 +22,7 @@
  * single move happens before their loadout is applied — see `applyLoadout` in roles.ts.
  */
 
-import { RoleId, Team } from "../core/enums";
+import { MAX_SLOTS, RoleId, Team } from "../core/enums";
 import * as reg from "../core/registry";
 import { isPlayingTeam, switchTeam, teamOf } from "../cs2/pawn";
 import { bodyOfPlayer } from "../cs2/bodies";
@@ -42,13 +42,43 @@ export function teamForRole(role: RoleId): Team {
  * ends up on T before roles are dealt. Idempotent: a player already on T is skipped, which matters
  * because `switchTeam` can respawn the pawn.
  */
+/**
+ * Slots TTT itself parked in spectator (a late join into a live round), as opposed to players who
+ * chose to spectate.
+ *
+ * The distinction is load-bearing for {@link resetTeamsToT}: it leaves genuine spectators alone, so
+ * without this a late joiner would be benched FOREVER — parked by TTT, then skipped by every
+ * subsequent countdown because they look like they opted out.
+ */
+const benched = new Uint8Array(MAX_SLOTS);
+
+/** Mark `slot` as benched by TTT (late join), so the next countdown pulls them back in. */
+export function setBenched(slot: number): void {
+  if (slot >= 0 && slot < MAX_SLOTS) benched[slot] = 1;
+}
+
+/** Drop every bench mark — map change and unload. */
+export function clearBenched(): void {
+  benched.fill(0);
+}
+
 export function resetTeamsToT(): void {
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
-    // Leave genuine spectators alone — they opted out, they are not hiding a role.
-    if (!isPlayingTeam(slot)) continue;
-    if (teamOf(slot) === Team.Terrorist) continue;
+    // Leave GENUINE spectators alone — they opted out, and they are not hiding a role.
+    //
+    // `Team.None` is NOT that. It means "connected but has not picked a side yet", which is where a
+    // fresh joiner sits, and the old `!isPlayingTeam(slot)` test lumped the two together and skipped
+    // both. A player who joined an idle or counting-down server was therefore never moved onto T,
+    // never respawned by the countdown ticker (which only respawns players on a playing team), never
+    // eligible, and never dealt a role — they just sat on the unassigned icon watching a round they
+    // were not in. Only a deliberate Spectator is left where they are.
+    const team = teamOf(slot);
+    // A spectator TTT benched itself (late join) is pulled back in; one who chose it is not.
+    if (team === Team.Spectator && benched[slot] === 0) continue;
+    benched[slot] = 0;
+    if (team === Team.Terrorist) continue;
     switchTeam(slot, Team.Terrorist);
   }
 }
