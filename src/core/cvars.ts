@@ -226,14 +226,16 @@ const SPECS: readonly Spec[] = [
   //
   // The DNA scanner still works without it: the bearing/range/clock HUD and the identification are
   // untouched. Only the through-wall outline on the killer is gone.
-  // The role-reveal glow is a BRIEF confirmation of what you were just dealt, not a permanent
-  // outline. Left up all round it turns every Traitor into a lit target for anyone who happens to
-  // be looking at the right moment. The floating role marker is what persists — that is the
-  // traitor-buddy indicator — so fading the glow costs Traitors nothing in identifying each other.
-  // 0 disables the fade and restores the always-on behaviour.
-  // The role-reveal screen wash. 0 disables it entirely.
+  // The role-colour screen wash on assignment. 0 disables it entirely.
   S("sm_ttt_role_flash_seconds", "int", 4, "Seconds the role-colour screen wash lasts (0 = off)", 0, 30),
-  S("sm_ttt_role_glow_seconds", "int", 4, "Seconds the role-reveal glow stays up (0 = never fade)", 0, 120),
+  // NEVER FADES BY DEFAULT (0), because the glow IS the traitor-buddy indicator.
+  //
+  // This shipped at 4 seconds on the theory that the glow was a brief "here is what you were dealt"
+  // confirmation, and that the floating worldtext marker was what Traitors used to find each other.
+  // That had it backwards: players read the GLOW. Fading it meant the buddy indicator lit up and then
+  // vanished, reported from a live server as the glow "working and then disappearing". A positive
+  // value still fades it for anyone who wants that; the default no longer takes the feature away.
+  S("sm_ttt_role_glow_seconds", "int", 0, "Seconds the role glow stays up (0 = never fade)", 0, 120),
   S("sm_ttt_dna_glow", "bool", false, "Through-wall glow marking the killer for the DNA scanner"),
   // --- crash bisect switches ---------------------------------------------------------------
   // Clients have hard-crashed with `CopyExistingEntity: missing client entity N`, which is what a
