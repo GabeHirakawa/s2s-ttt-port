@@ -531,7 +531,7 @@ function tickStations(dt: number): void {
     // The budget is tested at the START of an interval, as the C# did: the tick that exhausts it
     // still lands in full on everyone in range, and the station only disappears afterwards.
     if (st.budget > 0 && st.given > st.budget) {
-      st.ref?.remove();
+      st.ref?.acceptInput("Kill");
       stations.splice(i, 1);
       continue;
     }
@@ -856,11 +856,11 @@ function tickTripwires(dt: number): void {
   for (let i = tripwires.length - 1; i >= 0; i--) {
     const tw = tripwires[i]!;
     if (!tw.alive) {
-      tw.beam?.remove();
-      tw.propA?.remove();
-      tw.propB?.remove();
-      tw.glowA?.remove();
-      tw.glowB?.remove();
+      tw.beam?.remove();  // BeamHandle has no I/O surface; a beam is a client-side effect, not a networked prop
+      tw.propA?.acceptInput("Kill");
+      tw.propB?.acceptInput("Kill");
+      tw.glowA?.acceptInput("Kill");
+      tw.glowB?.acceptInput("Kill");
       tripwires.splice(i, 1);
       continue;
     }
@@ -1293,15 +1293,15 @@ export function resetEffects(): void {
   poisonFromSmoke.fill(0);
   activeC4 = 0;
 
-  for (let i = 0; i < stations.length; i++) stations[i]!.ref?.remove();
+  for (let i = 0; i < stations.length; i++) stations[i]!.ref?.acceptInput("Kill");
   stations.length = 0;
   for (let i = 0; i < tripwires.length; i++) {
     const tw = tripwires[i]!;
-    tw.beam?.remove();
-    tw.propA?.remove();
-    tw.propB?.remove();
-    tw.glowA?.remove();
-    tw.glowB?.remove();
+    tw.beam?.remove();  // BeamHandle has no I/O surface; a beam is a client-side effect, not a networked prop
+    tw.propA?.acceptInput("Kill");
+    tw.propB?.acceptInput("Kill");
+    tw.glowA?.acceptInput("Kill");
+    tw.glowB?.acceptInput("Kill");
   }
   tripwires.length = 0;
 }

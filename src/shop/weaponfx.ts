@@ -397,14 +397,14 @@ function clearDnaGlow(slot: number): void {
   if (model !== null) {
     // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
     // broadcasts a dying hidden entity to every client for one snapshot.
-    model.remove();
+    model.acceptInput("Kill");
     dnaGlowModel[slot] = null;
   }
   const relay = dnaGlowRelay[slot];
   if (relay !== null) {
     // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
     // broadcasts a dying hidden entity to every client for one snapshot.
-    relay.remove();
+    relay.acceptInput("Kill");
     dnaGlowRelay[slot] = null;
   }
 }
@@ -428,7 +428,7 @@ function spawnDnaGlow(viewer: number, target: number): void {
   if (relay === null) return;
   const glow = createEntity("prop_dynamic", { model, targetname: `ttt_dna_glow_${viewer}` });
   if (glow === null) {
-    relay.remove();
+    relay.acceptInput("Kill");
     return;
   }
 
@@ -452,10 +452,10 @@ function spawnDnaGlow(viewer: number, target: number): void {
   if (!Transmit.setVisibleTo(relay, only) || !Transmit.setVisibleTo(glow, only)) {
     // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
     // broadcasts a dying hidden entity to every client for one snapshot.
-    glow.remove();
+    glow.acceptInput("Kill");
     // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
     // broadcasts a dying hidden entity to every client for one snapshot.
-    relay.remove();
+    relay.acceptInput("Kill");
     return;
   }
   dnaGlowRelay[viewer] = relay;
@@ -695,7 +695,7 @@ const liveFragments: EntityRef[] = [];
 function destroyLiveFragments(): void {
   for (let i = 0; i < liveFragments.length; i++) {
     const nade = liveFragments[i]!;
-    if (nade.isValid()) nade.remove();
+    if (nade.isValid()) nade.acceptInput("Kill");
   }
   liveFragments.length = 0;
 }

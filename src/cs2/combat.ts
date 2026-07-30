@@ -690,7 +690,9 @@ function handleDeath(
   if (body !== null) {
     const created = bus.emit("bodyCreate", { body, canceled: false });
     if (created.canceled) {
-      body.ref.remove();
+      // `Kill` input, not a direct remove — see the note in bodies.ts. A recycled index is what
+      // crashes clients with `CopyExistingEntity`.
+      body.ref.acceptInput("Kill");
     } else {
       // Bring the ragdoll into the world, then hide the pawn so there is exactly ONE body.
       //

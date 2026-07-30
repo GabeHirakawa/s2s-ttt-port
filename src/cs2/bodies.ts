@@ -234,7 +234,11 @@ export function settleBody(body: Body): void {
 
 /** Destroy one body's ragdoll and forget it. */
 function removeBody(body: Body): void {
-  body.ref.remove();
+  // `Kill` input, not a direct remove: freeing an index immediately lets the engine recycle it
+  // before clients are told the old entity died, which is what produces
+  // `CopyExistingEntity: missing client entity N`. Matches the C#, which uses AcceptInput("Kill")
+  // for every teardown.
+  body.ref.acceptInput("Kill");
   byIndex.delete(body.index);
   if (byOwner.get(body.owner) === body) byOwner.delete(body.owner);
   const i = bodies.indexOf(body);
@@ -243,7 +247,7 @@ function removeBody(body: Body): void {
 
 /** Drop every tracked body. `removeEntities` also deletes the ragdolls. */
 export function clearBodies(removeEntities: boolean): void {
-  if (removeEntities) for (let i = 0; i < bodies.length; i++) bodies[i]!.ref.remove();
+  if (removeEntities) for (let i = 0; i < bodies.length; i++) bodies[i]!.ref.acceptInput("Kill");
   bodies.length = 0;
   byIndex.clear();
   byOwner.clear();

@@ -290,7 +290,11 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
 
   const glow = createEntity("prop_dynamic", { model, targetname: `ttt_glow_${slot}` });
   if (glow === null) {
-    relay.remove();
+    // `Kill` input, not a direct remove: freeing an index immediately lets the engine recycle it
+    // before clients are told the old entity died, which is what produces
+    // `CopyExistingEntity: missing client entity N`. Matches the C#, which uses AcceptInput("Kill")
+    // for every teardown.
+    relay.acceptInput("Kill");
     return false;
   }
   console.log(`[ttt] ENTTRACE make glow-model slot=${String(slot)} index=${String(glow.index)}`);
@@ -434,8 +438,22 @@ function destroyIcons(slot: number): void {
     const ent = icons[base + i];
     if (ent === null) continue;
     console.log(`[ttt] ENTTRACE free icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
-    // Removed while still filtered — see the note above.
-    ent.remove();
+    // "Kill" INPUT, never a direct remove.
+    //
+    // This is what the C# does for every icon teardown without exception
+    // (`RoleIconsHandler.removeIcon` -> `ent.AcceptInput("Kill")`), and the difference is not
+    // stylistic. A direct remove frees the entity AND ITS INDEX immediately, so the engine can hand
+    // that index to a new entity before clients have been told the old one died — and a client then
+    // receives an update for an index it has no record of, which is exactly what
+    // `CopyExistingEntity: missing client entity N` reports. It also explains why the reported index
+    // is usually NOT one of ours: by the time the client chokes on it, the index belongs to whatever
+    // recycled it.
+    //
+    // `Kill` queues the removal through the entity I/O system instead, so the engine tears the
+    // entity down at a point where it can network the deletion first. These entities are
+    // transmit-filtered, which makes them the worst possible candidates for a same-tick index
+    // recycle: they are by construction absent from some clients' tables already.
+    ent.acceptInput("Kill");
     icons[base + i] = null;
   }
 }
@@ -563,7 +581,11 @@ export function restrictToTraitors(ent: EntityRef): boolean {
     console.log("[ttt] WARN: transmit filtering unavailable — hiding Traitor-only markers instead of leaking them");
   }
   Transmit.reset(ent);
-  ent.remove();
+  // `Kill` input, not a direct remove: freeing an index immediately lets the engine recycle it
+  // before clients are told the old entity died, which is what produces
+  // `CopyExistingEntity: missing client entity N`. Matches the C#, which uses AcceptInput("Kill")
+  // for every teardown.
+  ent.acceptInput("Kill");
   return false;
 }
 
