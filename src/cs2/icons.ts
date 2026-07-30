@@ -284,6 +284,31 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
   // The keyvalue form was dismissed once before on the grounds that it "did not apply the model".
   // That test was confounded: the render mode was wrong in the same build, so the glow was invisible
   // either way and the keyvalue took the blame.
+  // REUSE the pair if this slot already has one. THIS IS THE POINT OF THE WHOLE FUNCTION NOW.
+  //
+  // These are transmit-filtered entities: by construction absent from some clients' entity tables.
+  // Freeing one mid-map lets the engine hand its index to something every client DOES receive, and
+  // those clients are then told to update an index they have no record of — `CopyExistingEntity:
+  // missing client entity N`, which drops them out of the game. Every previous attempt at this
+  // treated a symptom: ordering the teardown (`Kill` instead of remove), moving the frees off the
+  // assignment frame, then deleting the worldtext panels outright. Clients kept dropping, because
+  // the indices were still being freed and re-made every single round.
+  //
+  // So they are never freed while the map is running. The pair is built once per slot and re-pointed
+  // at the new pawn each round; `parkAllIcons` hides them between rounds instead of destroying them.
+  // Nothing varies per round except which pawn they follow — glow exists only for Traitors, so the
+  // model and colour are constant — which is what makes reuse safe here.
+  const heldRelay = icons[base + PART_GLOW_RELAY];
+  const heldGlow = icons[base + PART_GLOW_MODEL];
+  if (heldRelay !== null && heldGlow !== null && heldRelay.isValid() && heldGlow.isValid()) {
+    const held = wrapEntity("CBaseModelEntity", heldGlow).glow;
+    held.glowColorOverride = packRgba(c, 255);
+    held.glowing = true;
+    heldRelay.acceptInput("FollowEntity", "!activator", pawn.ref, heldRelay);
+    heldGlow.acceptInput("FollowEntity", "!activator", heldRelay, heldGlow);
+    return true;
+  }
+
   const relay = createEntity("prop_dynamic", { model, targetname: `ttt_glow_relay_${slot}` });
   if (relay === null) return false;
   console.log(`[ttt] ENTTRACE make glow-relay slot=${String(slot)} index=${String(relay.index)}`);
@@ -708,6 +733,18 @@ function tagAllRoles(): void {
 }
 
 /** Destroy every icon and forget the round's visibility state (the C# `OnRoundStart`). */
+/**
+ * Hide every slot's markers WITHOUT freeing an index — the ROUND boundary.
+ *
+ * `clearAllIcons` is the map-change path and destroys for real. Between rounds nothing may be freed:
+ * the Countdown transition is when every player respawns, so a released index is claimed almost
+ * immediately by a new pawn or weapon while some client still has no record of the marker that
+ * owned it. That is the crash, and it is why the teardown moved here.
+ */
+function parkAllIcons(): void {
+  for (let slot = 0; slot < MAX_SLOTS; slot++) parkIcons(slot);
+}
+
 function clearAllIcons(): void {
   // The one place markers are actually DESTROYED: a round boundary or teardown, where the engine sends
   // a full update and index recycling is safe again. Mid-round the parked (hidden) entities are kept.
@@ -824,7 +861,7 @@ export function installIcons(bus: EventBus<TttEvents>): void {
         // Round start: kill last round's icons and put every tagged name back BEFORE `beginRound`
         // refreshes the registry's name cache off the engine — otherwise "[T] Bob" becomes the
         // name TTT believes Bob has.
-        clearAllIcons();
+        parkAllIcons();
         stickers.fill(0);
         const active = reg.activeSlots();
         for (let i = 0; i < active.length; i++) clearRoleTag(active[i]!);
