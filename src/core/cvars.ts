@@ -226,6 +226,10 @@ const SPECS: readonly Spec[] = [
   //
   // The DNA scanner still works without it: the bearing/range/clock HUD and the identification are
   // untouched. Only the through-wall outline on the killer is gone.
+  // Floating worldtext role panels. OFF: they are four networked entities per marked player, freed
+  // and re-made every round, and that index churn is what drops clients with `CopyExistingEntity`.
+  // The Traitor glow (two entities, and the thing players actually read) is unaffected.
+  S("sm_ttt_role_panels", "bool", false, "Floating worldtext role panels above marked players"),
   // The role-colour screen wash on assignment. 0 disables it entirely.
   S("sm_ttt_role_flash_seconds", "int", 4, "Seconds the role-colour screen wash lasts (0 = off)", 0, 30),
   // NEVER FADES BY DEFAULT (0), because the glow IS the traitor-buddy indicator.
@@ -405,6 +409,7 @@ export const cfg = {
   dnaGlow: false,
   roleGlowSeconds: 4,
   roleFlashSeconds: 4,
+  rolePanels: false,
   /** Starting weapons by {@link RoleId} index. */
   roleWeapons: [[], [], [], [], []] as string[][],
   /** Starting credits by {@link RoleId} index. */
@@ -445,6 +450,7 @@ function rebuild(): void {
   cfg.dnaGlow = b("sm_ttt_dna_glow");
   cfg.roleGlowSeconds = n("sm_ttt_role_glow_seconds");
   cfg.roleFlashSeconds = n("sm_ttt_role_flash_seconds");
+  cfg.rolePanels = b("sm_ttt_role_panels");
   cfg.roleWeapons[1] = list("sm_ttt_roleweapons_innocent");
   cfg.roleWeapons[2] = list("sm_ttt_roleweapons_traitor");
   cfg.roleWeapons[3] = list("sm_ttt_roleweapons_detective");

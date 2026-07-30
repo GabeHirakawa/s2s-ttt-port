@@ -343,7 +343,18 @@ function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
 
   const letter = iconLetter(role);
   const base = slot * PARTS;
-  for (let i = 0; i < HAT_YAWS.length; i++) {
+  // The floating worldtext panels are OFF by default — see `sm_ttt_role_panels`.
+  //
+  // They are four networked entities per marked player whose indices are freed and re-made every
+  // round, and index churn on marker entities is what drops clients with `CopyExistingEntity`. The
+  // glow below is what players actually read to identify a fellow Traitor, and it is two entities
+  // rather than four; the Detective carries panels and NO glow, which is why the Detective was the
+  // most consistent trigger. Turning the panels off removes the Detective's marker entities outright
+  // and halves a Traitor's, while keeping the buddy glow intact.
+  //
+  // The Detective is still publicly identifiable without them: they are the only role on CT and they
+  // carry the "Detective" scoreboard tag.
+  for (let i = 0; cfg.rolePanels && i < HAT_YAWS.length; i++) {
     const ent = spawnHatPart(
       pawn,
       origin.x,
@@ -367,6 +378,7 @@ function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
   // would glow for everyone, since a Detective's marker carries no transmit rule to inherit.
   if (role === RoleId.Traitor && !spawnGlow(slot, pawn, role)) {
     console.log(`[ttt] WARN: glow spawn failed slot=${slot}`);
+    return false;
   }
   return true;
 }
