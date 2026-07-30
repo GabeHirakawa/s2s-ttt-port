@@ -743,9 +743,21 @@ export function installIcons(bus: EventBus<TttEvents>): void {
 
       if (role === RoleId.None || role === RoleId.Spectator) return;
 
-      // A deal happens at a round boundary, so destroying here is safe and keeps the pool from growing:
-      // last round's parked markers go now, and this round's are built fresh below.
-      destroyIcons(slot);
+      // NOTHING IS DESTROYED HERE. This used to call `destroyIcons(slot)`, and that was the crash.
+      //
+      // Freeing an entity index in the same frame new markers are spawned lets the engine hand that
+      // index straight back out — observed directly: `free icon slot=2 part=2 index=454` followed by
+      // `make glow-relay slot=5 index=454`. Both ends of that swap are transmit-filtered, so both are
+      // by construction absent from some clients' entity tables, and a client that never held the old
+      // one is then told to update an index it has no record of: `CopyExistingEntity: missing client
+      // entity N`, which drops the player out of the game. It showed up most on the Detective because
+      // that is where filtered and unfiltered markers churn indices against each other at once.
+      //
+      // The destruction is not needed here anyway: `clearAllIcons` already ran at the Countdown
+      // transition, a full countdown before any marker is spawned and the one boundary where nothing
+      // else is being created. A survivor at this point can only come from a hot reload, and it
+      // is parked rather than freed — hiding costs a transmit rule, freeing costs a client.
+      parkIcons(slot);
       // Recorded before the panels exist: every Traitor is dealt in this same frame, so by the
       // time the deferred spawns run the set is complete and one refresh covers all of them.
       // Bounded at 64 because `setVisibleTo` throws RangeError on a viewer outside [0, 64).
@@ -806,7 +818,11 @@ export function installIcons(bus: EventBus<TttEvents>): void {
         for (let i = 0; i < active.length; i++) clearRoleTag(active[i]!);
         return;
       }
-      // Round end reveals everyone's real role on the scoreboard.
+      // Round end reveals everyone's real role on the scoreboard. It deliberately does NOT free the
+      // markers: damage is still allowed while FINISHED, so corpses are still being spawned here, and
+      // a corpse claiming a just-freed icon index is the same crash in a different costume (observed:
+      // `free icon ... index=776` followed by `make corpse ... index=776`). The destruction happens at
+      // the Countdown transition instead — the one boundary where nothing is spawning at all.
       if (ev.state === GameState.Finished) tagAllRoles();
     },
     { ignoreCanceled: true },
