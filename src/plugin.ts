@@ -158,6 +158,10 @@ function applyServerSettings(): void {
   // living voices across the team line and the result on a live server was that nobody could hear
   // anybody. Same category as `mp_teammates_are_enemies`: the engine is opened up so TTT arbitrates.
   Server.command("sv_alltalk 1");
+  // vaudio_speex produced severe, painful distortion for some speakers on a live server; the steam
+  // codec is the one that works. Asserted here for the same reason as the cvars below: a workshop
+  // map load refuses `sv_voicecodec` by name, so a server cfg alone loses it on every TTT map.
+  Server.command("sv_voicecodec vaudio_steam");
   // `sv_full_alltalk` is deliberately NOT set. It governs the ALIVE/DEAD line, which is the one
   // boundary TTT most needs held: a dead player naming their killer to the living ends the round's
   // central secret. Turning it on would make the plugin's voice masks the ONLY thing preventing that

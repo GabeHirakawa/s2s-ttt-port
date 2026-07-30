@@ -15,7 +15,7 @@
 
 import { MAX_SLOTS } from "../core/enums";
 import { Player } from "@s2script/cs2";
-import { setPawnHealth, setPawnIsAlive, setPawnLifeStateAlive, setPawnLifeStateDead } from "./pawn";
+import { setPawnHealth, setPawnIsAlive, setPawnLifeStateDead } from "./pawn";
 import { isConnected } from "../core/registry";
 
 /** Slots currently being spoofed as alive. */
@@ -112,30 +112,23 @@ export function tickSpoof(): void {
       spoofed.splice(i, 1);
       continue;
     }
-    // ONLY the controller's mirror. The pawn's own `lifeState` is deliberately NOT written here.
-    //
-    // This used to write `setPawnLifeStateAlive` as well, on the reasoning that the mirror re-derives
-    // from the pawn and so needs the pawn to agree. It does — but `lifeState` is the value the
-    // VICTIM'S OWN client reads to decide it has died, and a pawn held at LIFE_ALIVE never lets them
-    // into observer mode: they spent the rest of the round frozen at the spot their pawn dropped,
-    // staring at the death panel, unable to spectate. That is far worse than what the pawn write was
-    // there to fix (a one-frame scoreboard blip as the controller's think re-derives the flag), and
-    // the illusion does not need it: the mirror is what every OTHER client's scoreboard reads, and
+    // ONLY the controller's mirror — the value every OTHER client's scoreboard reads, so
     // re-asserting it every frame keeps it correct without touching the victim's own view.
-    // The pawn's own `lifeState` is written again, and this is a TRADE, not a fix.
     //
-    // Measured on a live server: with the death event fully suppressed (our handler returns Handled,
-    // the core collapses the chain with a MAX, the shim re-fires with bDontBroadcast=true) and with
-    // our own re-fire to Traitors removed — so ZERO death events reach any client — innocents STILL
-    // saw the kill feed. The only sender left is the engine, and the only thing that ever hid the feed
-    // was this write: a pawn held at LIFE_ALIVE never lets a client observe the death, so the client
-    // never synthesises a feed entry.
+    // THE PAWN'S `lifeState` IS DELIBERATELY NOT WRITTEN. It was, for a while, as an explicit trade:
+    // the kill feed stayed visible to Innocents no matter how thoroughly the death event was
+    // suppressed, and holding the pawn at LIFE_ALIVE was the only thing that hid it — a client that
+    // never observes the death never synthesises a feed entry. The cost was that the VICTIM'S OWN
+    // client reads this same field to decide it has died, so a pawn pinned to LIFE_ALIVE never let
+    // them into observer mode: they spent the rest of the round locked to a camera above their
+    // corpse, their killer frozen on screen, unable to spectate anyone.
     //
-    // The cost is the one this write used to have: the VICTIM cannot enter observer mode, so they are
-    // stuck at their corpse. Hiding who died is the more important of the two for TTT — a visible feed
-    // tells every Innocent exactly who the Traitors are — so the feed wins until the victim's view can
-    // be solved separately (an explicit observer-mode switch, which needs SDK support we do not have).
-    setPawnLifeStateAlive(slot);
+    // That trade rested on a false premise. The suppression it was compensating for was not failing
+    // for want of this write — every `player_death` pre-hook was throwing a TypeError on its final
+    // `return HookResult.Handled` statement, so the result never reached the collapse and the engine
+    // broadcast the death to everyone. With that fixed, scoped suppression demonstrably works (the
+    // per-client post is dropped for non-killers, confirmed on a live server), so the feed stays
+    // hidden with the pawn left alone and the victim gets their spectator camera back.
     setPawnIsAlive(slot, true);
     setPawnHealth(slot, heldHealth[slot]!);
   }
