@@ -19,7 +19,16 @@
 
 import { cfg } from "../core/cvars";
 import { nextFrame } from "@s2script/sdk/timers";
-import { HookResult, Player, type HookResultValue, type MatchStats } from "@s2script/cs2";
+import { Player, type MatchStats } from "@s2script/cs2";
+// `HookResult` comes from the events package, NOT from `@s2script/cs2` — even though cs2's `index.d.ts`
+// re-exports it (`export { HookResult } from "@s2script/sdk/events"`) and so type-checks perfectly
+// either way. cs2 is a TYPES-ONLY package whose runtime module is injected by the host, and that
+// injected module does not carry the re-export. Importing it from cs2 therefore yields `undefined` at
+// runtime, and `return HookResult.Handled` throws a TypeError on the last statement of the hook — after
+// the handler has already done its work, so every symptom pointed at the suppression machinery instead.
+// The thrown result collapsed to Continue and the engine broadcast every death to every client: this is
+// the kill feed that Innocents could see. Nothing below the plugin was ever at fault.
+import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 // `fireToClient` lives on the engine-generic Events, not the CS2 typed overlay.
 import { Events } from "@s2script/sdk/events";
 import type { GameEvent } from "@s2script/sdk/events";
@@ -34,11 +43,11 @@ import { checkEndConditions, inProgress } from "../game/game";
 import { roleName, roleNameFor } from "../game/roles";
 import { logDamage, logDeath } from "../game/logger";
 import { settleBody, spawnBody } from "./bodies";
-import { clearAttributedKills, pawnOf, setArmor, setHealth, takeAttributedKiller, tell } from "./pawn";
+import { clearAttributedKills, DEFAULT_HEALTH, pawnOf, setArmor, setHealth, takeAttributedKiller, tell } from "./pawn";
 import { resetPawnColor, setPawnAlpha } from "./color";
-import { spoofAlive, unspoofAlive } from "./spoof";
+import { spoofAlive, unspoofAlive, clearSpoof } from "./spoof";
 import { refreshInvulnerability } from "./handlers";
-import { weaponClass, type HeldWeapon } from "./inventory";
+import { stripToSidearms, weaponClass, type HeldWeapon } from "./inventory";
 
 /** Maps a pawn entity index back to the slot that owns it — filled lazily per damage event. */
 function slotOfPawn(entityIndex: number): number {
@@ -380,6 +389,11 @@ export function installMatchStats(bus: EventBus<TttEvents>): void {
  * without an event to carry it.
  */
 let deathBus: EventBus<TttEvents> | null = null;
+/** One-shot diagnostics for the recipient-scoping surface. */
+let warnedNoRecipients = false;
+let loggedRecipientsOnce = false;
+/** One-shot: a throwing `handleDeath` would otherwise silently defeat feed suppression. */
+let warnedDeathThrew = false;
 
 /** Give the gadget-kill path a bus before any engine death has happened. */
 export function setDeathBus(bus: EventBus<TttEvents>): void {
@@ -460,6 +474,39 @@ export function clearGadgetKills(): void {
  * `player_death` pre-hook: suppress the public broadcast and re-fire it only to the killer and (if
  * the killer is a Traitor) their fellow Traitors — the C# `CombatHandler.OnPlayerDeath_Pre`.
  */
+
+export function installDeathFeedSuppressor(): void {
+
+  // Retained as a no-op seam: the suppression now happens in the shim, which is the only layer that
+  // sees the client-bound carrier. Plugin-side subscription to it is accepted and never delivered.
+}
+
+/**
+ * Restrict the death event now being pre-dispatched to `viewers`.
+ *
+ * Guarded and logged once, because `dispatch_game_event_pre` drops a subscriber that THROWS and logs
+ * nothing at all — an unreachable `setRecipients` would silently disable suppression for the rest of
+ * the session with no trace of why.
+ */
+function setDeathViewers(viewers: readonly number[]): void {
+  const setter = (Events as unknown as { setRecipients?: (s: readonly number[]) => void }).setRecipients;
+  if (typeof setter !== "function") {
+    if (!warnedNoRecipients) {
+      warnedNoRecipients = true;
+      console.log("[ttt] Events.setRecipients unavailable — the kill feed cannot be scoped");
+    }
+    return;
+  }
+  try {
+    setter.call(Events, viewers);
+  } catch (err) {
+    if (!warnedNoRecipients) {
+      warnedNoRecipients = true;
+      console.log(`[ttt] Events.setRecipients threw: ${String(err)}`);
+    }
+  }
+}
+
 export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultValue | void {
   deathBus = bus;
   const victim = ev.getPlayerSlot("userid");
@@ -479,7 +526,18 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
   // time a pre-hook runs, and suppressing the broadcast does not undo them.
   rollbackDeathStats(victim, engineKiller, assister, ev.getInt("dmg_health"));
 
-  if (!inProgress()) return;
+  // A death OUTSIDE a live round is still a death, and it was leaking the whole feed.
+  //
+  // Bots (and players) keep fighting through the end-of-round window — damage is deliberately allowed
+  // while FINISHED — and every one of those deaths took this early return, so it was never scoped and
+  // the engine broadcast it to everyone. That is a large share of the entries still appearing in the
+  // feed. There are no roles to respect here, so it is scoped to the killer alone: they already see
+  // their own kill client-side, and nobody else has any business being told.
+  if (!inProgress()) {
+    const lone = engineKiller >= 0 && engineKiller !== victim ? [engineKiller] : [];
+    setDeathViewers(lone);
+    return HookResult.Handled;
+  }
 
   const weapon = ev.getString("weapon");
   const headshot = ev.getBool("headshot");
@@ -518,63 +576,65 @@ export function onDeathPre(bus: EventBus<TttEvents>, ev: GameEvent): HookResultV
     }
   }
 
-  // Re-fire to the recipients who are allowed to see it, before we suppress the broadcast.
-  // The C# guards on `ev.Attacker != null` only, so a suicide still reaches the victim's own feed.
+  // NAME THE VIEWERS instead of rebuilding the event for them.
+  //
+  // CS2 fans a game event out to clients as one message PER CLIENT, so `HookResult.Handled` alone is
+  // all-or-nothing: it either hides a death from everybody or from nobody. `Events.setRecipients` tells
+  // the shim which of those per-client posts to let through, so the REAL event — with every field the
+  // engine populated, assister and hit modifiers included — reaches exactly the viewers entitled to it.
+  //
+  // Who is entitled: the killer (they already see their own kill client-side, and withholding the
+  // server copy only desynchronises their feed) and, when the killer is a Traitor, their fellow
+  // Traitors. Everyone else learns nothing — which is the whole point of the mode.
+  //
+  // This replaces a loop that re-fired a hand-rebuilt copy of the event to each Traitor. That copy
+  // could only ever carry the fields we thought to include, and it double-entered the killer's feed.
+  const viewers: number[] = [];
   if (killer >= 0) {
-    const victimUserId = Player.fromSlot(victim)?.userId ?? -1;
-    const killerUserId = Player.fromSlot(killer)?.userId ?? -1;
-    // The C# re-fires the ORIGINAL event object, so every field the engine populated survives.
-    // Rebuilding only userid/attacker/weapon/headshot stripped the one feed TTT deliberately shows
-    // of the assist name and of every hit modifier the icons are drawn from. One allocation per
-    // death, same as before. `distance`/`dmg_*`/`hitgroup`/`weapon_*` are left out: nothing renders
-    // them, and `distance` is the one field whose float inference through `fireToClient` cannot be
-    // confirmed from the stubs.
-    const fields: Record<string, string | number | boolean> = {
-      userid: victimUserId,
-      attacker: killerUserId,
-      weapon,
-      headshot,
-      assistedflash: ev.getBool("assistedflash"),
-      attackerblind: ev.getBool("attackerblind"),
-      attackerinair: ev.getBool("attackerinair"),
-      noscope: ev.getBool("noscope"),
-      thrusmoke: ev.getBool("thrusmoke"),
-      penetrated: ev.getInt("penetrated"),
-      dominated: ev.getInt("dominated"),
-      revenge: ev.getInt("revenge"),
-    };
-    // Only when there IS one: `assister` is a player field, and a stamped -1 would make the feed
-    // render a bogus assist on every single kill.
-    if (assister >= 0) {
-      const assisterUserId = Player.fromSlot(assister)?.userId ?? -1;
-      if (assisterUserId >= 0) fields.assister = assisterUserId;
-    }
-    // The KILLER is not re-fired to. They already see the kill.
-    //
-    // The C# does re-fire to the attacker, and this followed it — but on this build it produces TWO
-    // kill-feed entries for the killer and one for everyone else entitled to see it. Instrumenting
-    // proved the duplicate is not ours: exactly one dispatch per death reached the killer, the
-    // traitor loop already skips them, `fireToClient` cannot re-enter our own pre-hook, and the
-    // suppression path (`HookResult.Handled` -> re-fire with bDontBroadcast) is what hides the death
-    // from everyone else. The second entry is the client's own, which the suppression does not reach.
-    //
-    // Fellow Traitors still need theirs: they are not the killer, so nothing renders it for them.
+    viewers.push(killer);
     if (reg.roleOf(killer) === RoleId.Traitor) {
       const active = reg.activeSlots();
       for (let i = 0; i < active.length; i++) {
         const other = active[i]!;
-        // Only the killer is skipped (they were served above), matching the C# recipient loop: a
-        // Traitor killed by a fellow Traitor still gets their own death notice.
-        if (other === killer) continue;
-        if (reg.roleOf(other) === RoleId.Traitor) {
-          Events.fireToClient(other, "player_death", fields);
-        }
+        if (other !== killer && reg.roleOf(other) === RoleId.Traitor) viewers.push(other);
       }
     }
   }
+  // CONTAINED. A throw anywhere in here unwinds out of this pre-hook, so the handler never reaches its
+  // `return HookResult.Handled` below — and `dispatch_game_event_pre` treats a throwing subscriber as
+  // `Err(())` and drops its result SILENTLY, with no log. The chain then collapses to Continue, the
+  // engine broadcasts the death untouched, and every client sees the kill feed. One misbehaving `death`
+  // listener (karma, DNA, stats, the win check — TTT's own EventBus.emit has no try/catch either) is
+  // therefore enough to defeat the suppression on every single death, invisibly.
+  //
+  // The consequences of a death matter, but not at the price of leaking who killed whom: the throw is
+  // logged and the hook still returns Handled.
+  try {
+    handleDeath(bus, victim, killer, assister, cause, headshot);
+  } catch (err) {
+    if (!warnedDeathThrew) {
+      warnedDeathThrew = true;
+      const detail = err instanceof Error && err.stack !== undefined ? err.stack : String(err);
+      console.log(`[ttt] handleDeath threw — death consequences incomplete: ${detail}`);
+    }
+  }
 
-  handleDeath(bus, victim, killer, assister, cause, headshot);
-  // Suppress the public broadcast: nobody else learns this player died.
+  // The mask is set HERE — after `handleDeath`, immediately before returning — and not before it.
+  //
+  // The mask is a single global slot consumed by the shim on the next suppressing FireEvent. Setting it
+  // before `handleDeath` left a window in which anything that fires a game event (a corpse spawn, a
+  // sound, a nested dispatch) would have ITS pre-hook consume our mask, so the death then fanned out
+  // unscoped. That is exactly the intermittency observed: suppression worked for some deaths and not
+  // others, depending on what `handleDeath` happened to do.
+  setDeathViewers(viewers);
+
+  // Suppressed for EVERY client by returning Handled: the shim carries that decision through to the
+  // `CMsgSource1LegacyGameEvent` post that actually delivers the event, so nobody outside the
+  // per-client re-fire above (Traitors) learns of this death.
+  //
+  // No field-blanking fallback here any more. Rewriting `attacker` to the victim did hide WHO killed
+  // whom, but it left every death visible as a suicide — which is its own lie, and a bad one in a mode
+  // built on not knowing who is dead.
   return HookResult.Handled;
 }
 
@@ -733,14 +793,26 @@ export function onPlayerHurt(bus: EventBus<TttEvents>, gev: GameEvent): void {
     // CAVEAT: this restores the armour VALUE only. A cancelled headshot that broke the helmet still
     // leaves `pawnHasHelmet` false — `player_hurt` carries no helmet field. Unavoidable on a
     // post-damage path, and far smaller than losing the armour outright.
-    setHealth(victim, remaining + dealt);
+    // CLAMPED to the pawn's own ceiling. `remaining + dealt` is the health they had before the hit
+    // only while the hit was survivable — a TASER deals 500, so a cancelled tase refunded 500 onto a
+    // 100-HP player. Worse, `setHealth` raises `maxHealth` to fit anything larger, so the victim kept
+    // a 500-HP ceiling for the rest of the round: one tase made someone effectively unkillable.
+    //
+    // The ceiling is read BEFORE the write so a hit that already inflated it cannot be laundered into
+    // the clamp.
+    const cap = pawnOf(victim)?.maxHealth ?? DEFAULT_HEALTH;
+    setHealth(victim, Math.min(remaining + dealt, cap));
     if (dmgArmor > 0) setArmor(victim, armor + dmgArmor);
     return;
   }
   damageDiag.applied++;
   if (ev.damage !== dealt) {
     // Apply the delta a listener asked for (e.g. the One-Shot Revolver raising it to lethal).
-    const target = remaining + dealt - ev.damage;
+    // Clamped upward for the same reason as the refund above: a listener that REDUCES a 500-damage
+    // taser hit would otherwise hand the victim a health total — and a max-health ceiling — far above
+    // anything they should have.
+    const cap = pawnOf(victim)?.maxHealth ?? DEFAULT_HEALTH;
+    const target = Math.min(remaining + dealt - ev.damage, cap);
     setHealth(victim, target);
   }
   if (inProgress() && attacker >= 0 && attacker !== victim) {
@@ -760,6 +832,17 @@ export function onSpawn(slot: number): void {
   // A fresh pawn starts opaque — clears the death-hide and any camouflage from last round.
   resetPawnColor(slot);
   reg.setAlive(slot, reg.computeAlive(slot));
-  // A respawn ends any lingering illusion — they really are alive now.
-  unspoofAlive(slot);
+  // A respawn ends any lingering illusion — they really are alive now. `clearSpoof`, NOT
+  // `unspoofAlive`: the latter writes real DEAD state, which on a freshly spawned pawn kills it.
+  clearSpoof(slot);
+
+  // Every round starts like a pistol round: you spawn with your pistol and knife, and everything
+  // else is on the map to be picked up.
+  //
+  // The spawn is the ONLY place this belongs. A respawn does not clear what a player was carrying, so
+  // whatever they held at the end of the last round — including anything grabbed off the floor in the
+  // seconds before the restart — came back with them, and they began the new round already armed.
+  // Stripping here, and only here, resets the arsenal without touching the scavenging that follows:
+  // the 15-second countdown and the whole round remain theirs to pick up from and KEEP.
+  if (cfg.stripOnAssign) stripToSidearms(slot);
 }

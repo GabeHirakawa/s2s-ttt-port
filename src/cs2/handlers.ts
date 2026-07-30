@@ -20,12 +20,13 @@ import { hudLine, HUD_FONT_BIG, setCenterHud } from "./hud";
 import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
 import { cfg } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
+import { ADMFLAG, Admin } from "@s2script/sdk/admin";
 import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
-import { pawnOf, setArmor, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
+import { pawnOf, setArmor, setPawnIsAlive, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
 import { type HeldWeapon } from "./inventory";
-import { enforceRoundTeam, revealAsInnocent } from "../game/teams";
+import { enforceRoundTeam, revealAsInnocent, setBenched } from "../game/teams";
 import { colorBody } from "./color";
 import { unspoofAlive } from "./spoof";
 import { game, inProgress, inWarmup } from "../game/game";
@@ -377,6 +378,10 @@ function updateNames(): void {
       if (lateralSq > NAME_LATERAL * NAME_LATERAL) continue;
 
       // World geometry only: a teammate standing in front does not hide the name, a wall does.
+      //
+      // `WorldOnly` is `SOLID | WINDOW | PASSBULLETS`, so map glass built as world brush DOES block
+      // the name — deliberate. Glass built as a breakable ENTITY does not, because this mask
+      // excludes entities outright, and that is the only see-through-glass case we want.
       const los = Trace.line(eye, new Vector(oo.x, oo.y, oo.z + NAME_CHEST_Z), {
         mask: TraceMask.WorldOnly,
       });
@@ -508,6 +513,31 @@ export function tickHandlers(dt: number): void {
  */
 export function handleChat(slot: number, text: string): HookResultValue | void {
   if (!inProgress()) return;
+
+  // DEAD CHAT IS FOR THE DEAD. A living player must not read it; an admin may.
+  //
+  // CS2's own "dead can only talk to dead" rule keys off the pawn, and TTT spends the whole round
+  // lying to the engine about who is alive (`spoofAlive` holds the controller's mirror true so the
+  // scoreboard hides deaths). The engine therefore treats a dead TTT player as living and broadcasts
+  // their chat to everyone — which leaks both that they are dead AND whatever they saw before dying,
+  // the single most damaging thing a living player could be told.
+  //
+  // So the broadcast is suppressed and the line re-delivered only to the recipients entitled to it:
+  // other dead players, and admins (moderation needs to see it). The `[DEAD]` tag marks it as the
+  // side-channel it is, so a dead player can tell their message did not reach the living.
+  if (!reg.isAlive(slot) && !text.startsWith("@")) {
+    const body = text.trim();
+    if (body === "") return HookResult.Handled;
+    const active = reg.activeSlots();
+    for (let i = 0; i < active.length; i++) {
+      const other = active[i]!;
+      // Dead players see it; so do admins, alive or not. The speaker always sees their own line.
+      if (other !== slot && reg.isAlive(other) && !isChatAdmin(other)) continue;
+      tell(other, msgFor(other, "DEAD_CHAT_FORMAT", reg.nameOf(slot), body));
+    }
+    return HookResult.Handled;
+  }
+
   if (reg.roleOf(slot) !== RoleId.Traitor) return;
   if (!text.startsWith("@")) return;
 
@@ -524,6 +554,37 @@ export function handleChat(slot: number, text: string): HookResultValue | void {
     }
   }
   return HookResult.Handled;
+}
+
+/**
+ * May this player read dead chat while alive? GENERIC, the same bar the admin commands use.
+ *
+ * The server console (slot < 0) is not a chat recipient, so it is excluded rather than treated as
+ * root — the opposite of `isAdmin`'s console default, and correct here.
+ */
+function isChatAdmin(slot: number): boolean {
+  if (slot < 0) return false;
+  return Admin.forSlot(slot)?.hasFlags(ADMFLAG.GENERIC) === true;
+}
+
+/**
+ * Park a player who arrived mid-round in spectator until the next round.
+ *
+ * `setBenched` is what distinguishes this from someone who CHOSE to spectate: `resetTeamsToT` leaves
+ * genuine spectators alone, so without the mark a late joiner would be benched permanently — parked
+ * here, then skipped by every countdown afterwards.
+ *
+ * The alive mirror is written explicitly too. A freshly connected controller has no pawn and the
+ * engine leaves `m_bPawnIsAlive` set, so a late joiner READ AS ALIVE on everyone's scoreboard while
+ * being unable to play — which in a mode whose whole premise is "who is still alive" is actively
+ * misleading.
+ */
+export function benchLateJoiner(slot: number): void {
+  setBenched(slot);
+  toSpectator(slot);
+  setPawnIsAlive(slot, false);
+  reg.setAlive(slot, false);
+  tell(slot, msgFor(slot, "LATE_JOIN_SPECTATE"));
 }
 
 /**
@@ -549,8 +610,7 @@ export function onTeamChange(slot: number, newTeam: Team, disconnecting = false)
   // Joining a playing team mid-round without a role = spawning into a round already in progress.
   if (newTeam === Team.Terrorist || newTeam === Team.CounterTerrorist) {
     if (reg.roleOf(slot) === RoleId.None) {
-      toSpectator(slot);
-      tell(slot, msgFor(slot, "LATE_JOIN_SPECTATE"));
+      benchLateJoiner(slot);
       return;
     }
     // Already in the round: CT is this mode's "publicly confirmed innocent" signal, so a move
