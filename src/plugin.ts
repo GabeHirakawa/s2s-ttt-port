@@ -152,6 +152,31 @@ function applyServerSettings(): void {
   Server.command("mp_match_can_clinch 0");
   Server.command("mp_autoteambalance 0"); // teams are a TTT implementation detail
   Server.command("mp_limitteams 0");
+  // VOICE. TTT arbitrates who can hear whom itself (`Voice.setAudibleTo` — dead players talk to the
+  // dead, the living cannot listen in), which requires the ENGINE to be permissive so the plugin can
+  // do the restricting. With alltalk off the engine additionally blocks living voices from crossing
+  // the alive/dead line, and the result on a live server was that nobody could hear anybody at all.
+  // Same category as `mp_teammates_are_enemies`: the engine is opened up so TTT can arbitrate.
+  Server.command("sv_alltalk 1");
+  Server.command("sv_full_alltalk 1");
+
+  // CLIENT-CRASH MITIGATION, asserted here rather than left to operator config.
+  //
+  // TTT filters entity visibility per viewer (role icons, the traitor glow) through a CheckTransmit
+  // hook. With parallel entity packing on, worker threads pack per-client deltas while those bitvecs
+  // are being edited, and a client receives an update for an entity whose create it never got —
+  // `CopyExistingEntity: missing client entity N`, which drops the player out of the game. Alternate
+  // baselines compound it: that table is index-keyed with NO serial check, and entity indices are
+  // recycled constantly here (corpses, icons and glow props share them freely).
+  //
+  // These live with the plugin because the plugin is what creates the hazard. A server cfg is not
+  // enough on its own: loading a WORKSHOP map refuses these three by name at cfg-exec time
+  // ("DISALLOWED WORKSHOP CONVAR"), so a server that boots straight onto a workshop map never
+  // applies them. They ARE settable at runtime, which is what makes asserting them here work.
+  Server.command("sv_parallel_packentities 0");
+  Server.command("sv_parallel_sendsnapshot 0");
+  Server.command("sv_enable_alternate_baselines 0");
+
   // NOT set here: `mp_respawn_on_death_t/ct`. Those are a TTT-owned TOGGLE, flipped per round state by
   // `setEngineRespawnAllowed` in game.ts — the engine refuses `Respawn` while they are off, and leaving
   // them on would respawn players the instant they die mid-round. Re-asserting either value from here
