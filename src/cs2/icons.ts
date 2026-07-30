@@ -743,6 +743,19 @@ function tagAllRoles(): void {
  */
 function parkAllIcons(): void {
   for (let slot = 0; slot < MAX_SLOTS; slot++) parkIcons(slot);
+  // THE SAME BOOKKEEPING `clearAllIcons` DOES, and it is not optional.
+  //
+  // Omitting it leaked the round wide open: `traitors` still held LAST round's list, so
+  // `restrictIcons` handed this round's Traitor glow to whoever was a Traitor previously — reported
+  // from a live server as Traitors being highlighted for a Detective and for Innocents, "like prior
+  // Ts could see", which is exactly what it was. `revealed` is the same hazard one step further on: a
+  // Traitor made public by Stickers last round would stay public to everyone through this one,
+  // because `refreshTraitorIcons` skips a revealed slot rather than re-hiding it.
+  //
+  // Both live here rather than at the call site precisely so that hiding and destroying cannot drift
+  // apart again — the entities are now pooled, so this is the ONLY per-round reset there is.
+  traitors.length = 0;
+  revealed.fill(0);
 }
 
 function clearAllIcons(): void {
