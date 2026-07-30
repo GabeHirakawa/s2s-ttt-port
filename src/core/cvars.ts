@@ -231,6 +231,8 @@ const SPECS: readonly Spec[] = [
   // be looking at the right moment. The floating role marker is what persists — that is the
   // traitor-buddy indicator — so fading the glow costs Traitors nothing in identifying each other.
   // 0 disables the fade and restores the always-on behaviour.
+  // The role-reveal screen wash. 0 disables it entirely.
+  S("sm_ttt_role_flash_seconds", "int", 4, "Seconds the role-colour screen wash lasts (0 = off)", 0, 30),
   S("sm_ttt_role_glow_seconds", "int", 4, "Seconds the role-reveal glow stays up (0 = never fade)", 0, 120),
   S("sm_ttt_dna_glow", "bool", false, "Through-wall glow marking the killer for the DNA scanner"),
   // --- crash bisect switches ---------------------------------------------------------------
@@ -400,6 +402,7 @@ export const cfg = {
   roleArmor: new Int32Array(5),
   dnaGlow: false,
   roleGlowSeconds: 4,
+  roleFlashSeconds: 4,
   /** Starting weapons by {@link RoleId} index. */
   roleWeapons: [[], [], [], [], []] as string[][],
   /** Starting credits by {@link RoleId} index. */
@@ -439,6 +442,7 @@ function rebuild(): void {
   cfg.roleArmor[3] = n("sm_ttt_rolearmor_detective");
   cfg.dnaGlow = b("sm_ttt_dna_glow");
   cfg.roleGlowSeconds = n("sm_ttt_role_glow_seconds");
+  cfg.roleFlashSeconds = n("sm_ttt_role_flash_seconds");
   cfg.roleWeapons[1] = list("sm_ttt_roleweapons_innocent");
   cfg.roleWeapons[2] = list("sm_ttt_roleweapons_traitor");
   cfg.roleWeapons[3] = list("sm_ttt_roleweapons_detective");

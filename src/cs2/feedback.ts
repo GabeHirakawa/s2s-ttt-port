@@ -11,6 +11,7 @@
  */
 
 import { Fade } from "@s2script/cs2";
+import { cfg } from "../core/cvars";
 import { GameState, RoleId } from "../core/enums";
 import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
@@ -19,10 +20,15 @@ import { pawnOf } from "./pawn";
 import { ROLE_COLORS } from "./color";
 
 /**
- * Source fade timings are 4.12 fixed point — 1 second is `1 << 12`. The SDK passes the field
- * through untouched ("engine fade units"), so the conversion belongs here.
+ * MILLISECONDS, not the 4.12 fixed point this used to assume.
+ *
+ * The SDK passes these fields through untouched ("engine fade units"), so the scale is ours to get
+ * right — and `1 << 12` per second was wrong by a factor of four. It turned a nominal 3s fade after
+ * a 1s hold into 12288 and 4096, i.e. roughly a TWELVE second fade after a four second hold. The
+ * role wash covered most of the opening of every round, which is precisely the window where players
+ * need to be reading the map and each other.
  */
-const FADE_UNITS_PER_SECOND = 1 << 12;
+const FADE_UNITS_PER_SECOND = 1000;
 
 /** `FFADE_OUT` — start opaque and clear, which is the "flash of colour" the original used. */
 const FFADE_OUT = 0x0001;
@@ -52,9 +58,15 @@ function packColor(r: number, g: number, b: number, a: number): number {
 function flashRoleColor(slot: number, role: RoleId): void {
   const c = ROLE_COLORS[role];
   if (c === undefined) return;
+  // Budget split: hold at full tint for a quarter of the time, spend the rest fading out. Tunable
+  // live via `sm_ttt_role_flash_seconds` because the right number here is a feel judgement, not a
+  // correctness one, and iterating on it through a redeploy is miserable.
+  const total = Math.max(0, cfg.roleFlashSeconds) * FADE_UNITS_PER_SECOND;
+  if (total <= 0) return;
+  const hold = Math.round(total * 0.25);
   Fade.to(slot, {
-    duration: 3 * FADE_UNITS_PER_SECOND,
-    holdTime: 1 * FADE_UNITS_PER_SECOND,
+    duration: total - hold,
+    holdTime: hold,
     // Alpha 64: a tint you read at a glance, not a blind.
     color: packColor(c.r, c.g, c.b, 64),
     flags: FFADE_OUT | FFADE_PURGE,
