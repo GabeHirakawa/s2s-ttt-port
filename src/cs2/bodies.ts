@@ -16,7 +16,7 @@ import { Server } from "@s2script/sdk/server";
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
 import { MoveType, RoleId } from "../core/enums";
-import { pawnOf } from "./pawn";
+import { pawnOf, appliedModelOf } from "./pawn";
 import { roleModel } from "./icons";
 import { wrapEntity } from "@s2script/cs2";
 
@@ -111,7 +111,15 @@ export function spawnBody(
   const origin = pawn.origin;
   if (origin === null) return null;
   const angles = pawn.angles;
-  const model = roleModel(role);
+  // The model the victim was ACTUALLY wearing, not the one their role implies.
+  //
+  // The C# reads it off the pawn's skeleton; nothing here exposes that, so this uses the model this
+  // plugin last applied to them, falling back to the role's. The two normally agree — the role model
+  // is what gets applied — but they come apart whenever the swap did not land: a role rewritten
+  // between frames, a pawn that was stale when the deferred setModel ran, or a player whose model
+  // was never swapped at all. Building a ragdoll from a model the pawn is not wearing is how the
+  // corpse ends up as the wrong body, and a mismatched skeleton is a poor thing to network.
+  const model = appliedModelOf(slot) ?? roleModel(role);
 
   // One corpse per player per round: an admin respawn mid-round would otherwise leave the old
   // ragdoll behind, and a second body for the same player breaks the identification bookkeeping.

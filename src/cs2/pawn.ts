@@ -240,3 +240,29 @@ export function tell(slot: number, message: string): void {
 export function tellAll(message: string): void {
   Chat.toAll(message);
 }
+
+/**
+ * The model this plugin last applied to each slot's pawn, so a corpse can be built from the model
+ * the player was actually wearing.
+ *
+ * The C# reads it straight off the victim
+ * (`pawn.CBodyComponent.SceneNode.GetSkeletonInstance().ModelState.ModelName`). Nothing in the SDK
+ * exposes the skeleton's model name, so the next best source of truth is the value we set ourselves
+ * — which is the only thing that changes a pawn's model here anyway.
+ */
+const appliedModel: (string | null)[] = new Array<string | null>(MAX_SLOTS).fill(null);
+
+/** Record the model just applied to `slot`'s pawn. */
+export function noteAppliedModel(slot: number, model: string): void {
+  if (slot >= 0 && slot < MAX_SLOTS) appliedModel[slot] = model;
+}
+
+/** The model `slot`'s pawn is wearing, or null if this plugin has not set one. */
+export function appliedModelOf(slot: number): string | null {
+  return slot >= 0 && slot < MAX_SLOTS ? appliedModel[slot]! : null;
+}
+
+/** Forget every recorded model — map change and round reset. */
+export function clearAppliedModels(): void {
+  appliedModel.fill(null);
+}

@@ -67,7 +67,7 @@ import { inProgress } from "../game/game";
 import { roleName } from "../game/roles";
 import { cfg } from "../core/cvars";
 import { ROLE_COLORS, type Rgb } from "./color";
-import { pawnOf } from "./pawn";
+import { pawnOf, noteAppliedModel } from "./pawn";
 
 /**
  * Height above the pawn ORIGIN (its feet) that the icon is CENTRED on.
@@ -596,7 +596,8 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
     void nextFrame().then(() => {
       const later = pawnOf(slot);
       if (later === null || !later.isValid || reg.roleOf(slot) !== role) return;
-      later.ref.setModel(roleModel(role));
+      const applied = roleModel(role);
+      if (later.ref.setModel(applied)) noteAppliedModel(slot, applied);
     });
   });
 }
