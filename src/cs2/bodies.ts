@@ -134,8 +134,31 @@ export function spawnBody(
   // the model present at spawn without ever touching a staged entity.
   //
   // Collision and movement are configured below, after the spawn — see `configureCorpsePhysics`.
-  const ragdoll = createEntity("prop_ragdoll", { model, targetname: `ttt_body_${slot}` });
+  // CREATE -> CLEAR THE STAGING BIT -> SET MODEL -> SPAWN. This is `BodySpawner.makeGameRagdoll`'s
+  // ordering, and it is now reproducible here.
+  //
+  // The model used to be passed as a spawn keyvalue instead, because `setModel` asserts the entity is
+  // NOT in the staging list and a created-but-unspawned entity always is — and at the time nothing
+  // exposed a way to clear that bit. `EntityRef.clearIdentityFlags` exists for exactly this case now,
+  // and its own documentation is explicit that the alternatives "produce half-initialised entities
+  // that clients fail to copy". That is `CopyExistingEntity: missing client entity N`, the fatal that
+  // has been dropping clients all session — and corpses are the path a prior bisect already
+  // implicated ("bodies off = no crash"), with every captured crash index falling outside the set of
+  // entities this plugin traces.
+  //
+  // The C# clears `1 << 2` (`...Entity.Flags & ~(1 << 2)`); the same bit is cleared here.
+  const ragdoll = createEntity("prop_ragdoll");
   if (ragdoll === null) return null;
+  ragdoll.clearIdentityFlags(EF_IN_STAGING_LIST);
+  if (!ragdoll.setModel(model)) {
+    // No model means a ragdoll that spawns broken and networks broken — refuse rather than ship it.
+    ragdoll.acceptInput("Kill");
+    return null;
+  }
+  if (!ragdoll.spawn({ targetname: `ttt_body_${slot}` })) {
+    ragdoll.acceptInput("Kill");
+    return null;
+  }
 
   // ENTITY-INDEX TRACE — see the note in `removeIcons`. If a corpse claims an index a transmit-hidden
   // icon or glow prop just released, that is the suspected crash.
@@ -202,6 +225,13 @@ const SOLID_VPHYSICS = 6;
  * reads for most queries, `m_collisionAttribute.m_nCollisionGroup` is what VPhysics reads, and
  * setting only one leaves the two disagreeing.
  */
+/**
+ * The staging-list bit on an entity's identity flags (`1 << 2`), cleared before `setModel` so a
+ * created-but-unspawned ragdoll can take its model the way CS2's own body spawner does. The C#
+ * writes `...Entity.Flags & ~(1 << 2)`.
+ */
+const EF_IN_STAGING_LIST = 1 << 2;
+
 function configureCorpsePhysics(ref: EntityRef): void {
   const e = wrapEntity("CRagdollProp", ref);
   e.collision.collisionGroup = COLLISION_GROUP_DEBRIS;
