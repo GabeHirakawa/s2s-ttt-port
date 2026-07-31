@@ -54,6 +54,7 @@
  */
 
 import { Player, wrapEntity, type Pawn } from "@s2script/cs2";
+import { Server } from "@s2script/sdk/server";
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
 import { after, nextFrame } from "@s2script/sdk/timers";
@@ -311,7 +312,7 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
 
   const relay = createEntity("prop_dynamic", { model, targetname: `ttt_glow_relay_${slot}` });
   if (relay === null) return false;
-  console.log(`[ttt] ENTTRACE make glow-relay slot=${String(slot)} index=${String(relay.index)}`);
+  console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE make glow-relay slot=${String(slot)} index=${String(relay.index)}`);
 
   const glow = createEntity("prop_dynamic", { model, targetname: `ttt_glow_${slot}` });
   if (glow === null) {
@@ -322,7 +323,7 @@ function spawnGlow(slot: number, pawn: Pawn, role: RoleId): boolean {
     relay.acceptInput("Kill");
     return false;
   }
-  console.log(`[ttt] ENTTRACE make glow-model slot=${String(slot)} index=${String(glow.index)}`);
+  console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE make glow-model slot=${String(slot)} index=${String(glow.index)}`);
 
   // `createEntity` hands back a bare EntityRef; the schema field accessors come from wrapEntity.
   // The wrapper is a view over the ref, so it stays correct as the entity changes.
@@ -395,7 +396,7 @@ function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
       removeIcons(slot); // half a hat is worse than none — it reads as a different marker
       return false;
     }
-    console.log(`[ttt] ENTTRACE make icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
+    console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE make icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
     icons[base + i] = ent;
   }
 
@@ -474,7 +475,7 @@ function destroyIcons(slot: number): void {
   for (let i = PARTS - 1; i >= 0; i--) {
     const ent = icons[base + i];
     if (ent === null) continue;
-    console.log(`[ttt] ENTTRACE free icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
+    console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE free icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
     // "Kill" INPUT, never a direct remove.
     //
     // This is what the C# does for every icon teardown without exception

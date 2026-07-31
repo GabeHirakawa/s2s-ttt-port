@@ -12,6 +12,7 @@
  */
 
 import { cfg } from "../core/cvars";
+import { Server } from "@s2script/sdk/server";
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
 import { MoveType, RoleId } from "../core/enums";
@@ -162,7 +163,7 @@ export function spawnBody(
 
   // ENTITY-INDEX TRACE — see the note in `removeIcons`. If a corpse claims an index a transmit-hidden
   // icon or glow prop just released, that is the suspected crash.
-  console.log(`[ttt] ENTTRACE make corpse slot=${String(slot)} index=${String(ragdoll.index)}`);
+  console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE make corpse slot=${String(slot)} index=${String(ragdoll.index)}`);
 
   configureCorpsePhysics(ragdoll);
 
