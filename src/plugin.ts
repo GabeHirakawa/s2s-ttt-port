@@ -59,7 +59,7 @@ import {
   onPlayerHurt, onSpawn, setDeathBus,
 } from "./cs2/combat";
 import { clearBodies, precacheBodyModels } from "./cs2/bodies";
-import { initInteract, resetInteract, tickInteract } from "./cs2/interact";
+import { initInteract, inspectIdentify, resetInteract, tickInteract } from "./cs2/interact";
 import { reassertSpoof, resetSpoof, tickSpoof } from "./cs2/spoof";
 import { installFeedback } from "./cs2/feedback";
 import { clearBenched, wouldRefuseTeam } from "./game/teams";
@@ -404,6 +404,12 @@ export default plugin((ctx) => {
     if (slot < 0) return;
     return onItemPurchase(slot, ev.getString("weapon")) ? HookResult.Handled : undefined;
   });
+
+  // A weapon inspect identifies a corpse too, alongside USE — the C# routes both buttons into the
+  // one `onStartUse` trace (`PropMover.cs:53`). Driven off the event rather than the button bit
+  // because `PlayerButtons.Inspect` is `1 << 35` and will not survive a JS bitwise test; see
+  // `inspectIdentify`.
+  ctx.events.on("inspect_weapon", (ev) => inspectIdentify(ev.getPlayerSlot("userid")));
 
   // ── entity + damage ───────────────────────────────────────────────────────
   ctx.entities.onDamage((info) => onDamage(bus, info));

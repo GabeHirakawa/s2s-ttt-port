@@ -166,10 +166,10 @@ export function tickInteract(dt: number): void {
   }
 }
 
-/** Resolve what the player is looking at and act on it once. */
-function interactOnce(slot: number): void {
+/** The corpse the player is looking at (or standing over), if any. */
+function bodyInReach(slot: number): Body | undefined {
   const pawn = pawnOf(slot);
-  if (pawn === null) return;
+  if (pawn === null) return undefined;
 
   const hit = pawn.aimTrace({ distance: MAX_HOLD + 60, mask: TraceMask.ShotPhysics });
   let body: Body | undefined;
@@ -178,20 +178,59 @@ function interactOnce(slot: number): void {
     body = bodyByEntity(hit.entity.index);
   }
   // Fall back to proximity: a corpse whose model failed to load has nothing to trace against.
-  body ??= nearestBody(slot, REACH_SQ);
+  return body ?? nearestBody(slot, REACH_SQ);
+}
 
+/** Resolve what the player is looking at and act on it once. */
+function interactOnce(slot: number): void {
+  // Kept here as well as in `bodyInReach`: with no pawn there is nothing to pick up either, and
+  // falling through to `tryPickup` would be a behaviour change rather than a refactor.
+  if (pawnOf(slot) === null) return;
+
+  const body = bodyInReach(slot);
   if (body !== undefined) {
-    identify(slot, body);
+    identify(slot, body, true);
     return;
   }
   if (cfg.propPickup) tryPickup(slot);
 }
 
 /**
+ * Identify a corpse from a weapon inspect, as a second trigger alongside USE.
+ *
+ * The C# reaches this through the same door: `PropMover.onButtonsChanged` runs `onStartUse` when
+ * EITHER `PlayerButtons.Use` OR `PlayerButtons.Inspect` is pressed, and that trace is what feeds
+ * `PropPickupEvent` -> `BodyPickupListener` -> `BodyIdentifyEvent`.
+ *
+ * It is driven off the `inspect_weapon` game event rather than a button bit. `PlayerButtons.Inspect`
+ * is `1 << 35` (CSSharp `PlayerButtons.cs:48`) and `pawn.buttons` is a JS `number` — a `&` against
+ * it truncates to 32 bits, and `1 << 35` evaluates to `8` in JS because the shift count is taken
+ * mod 32. The {@link Button} enum simply cannot express this bit, so the event is the honest route.
+ * The cost is that a player with no weapon deployed cannot inspect, and so cannot identify this way;
+ * USE still works for them.
+ *
+ * NO CARRY, unlike the C#. This port's carry is hold-based (`tickInteract` releases the moment USE
+ * is not held), so a carry begun by a tap would drop on the very next tick. The C# gets away with
+ * sharing the path only because its release is gated on USE being released
+ * (`PropMover.cs:99`), which means an inspect-started grab there sticks until the player presses and
+ * releases E — a quirk, not something worth reproducing.
+ */
+export function inspectIdentify(slot: number): void {
+  // `identify` gates on the round for the identification itself, but the DNA read above that gate
+  // relies on the caller having done so — `tickInteract` is only pumped while the round is live
+  // (`plugin.ts`), whereas `inspect_weapon` fires whenever a player inspects. Match the tick path.
+  if (!inProgress()) return;
+
+  const body = bodyInReach(slot);
+  if (body === undefined) return;
+  identify(slot, body, false);
+}
+
+/**
  * Identify a corpse. Body Paint makes the corpse *appear* identified without revealing anything,
  * and Gloves let a Traitor move a body without triggering identification at all.
  */
-function identify(slot: number, body: Body): void {
+function identify(slot: number, body: Body, canCarry: boolean): void {
   // The DNA read is a SIBLING of identification in the C# (`DnaListener` subscribes to the same
   // `PropPickupEvent`), not a consequence of it: it fires on an already-identified body, on your own
   // body and on a body being moved with Gloves — so it goes above every gate below. (The C# also
@@ -206,6 +245,11 @@ function identify(slot: number, body: Body): void {
 
   // A Traitor wearing Gloves moves the body silently instead of identifying it.
   if (reg.roleOf(slot) === RoleId.Traitor && hasGloves(slot)) {
+    // On a trigger that cannot carry (inspect), stop here rather than falling through. Spending a
+    // charge would buy a carry that drops on the next tick, and letting the identification proceed
+    // instead would defeat the one thing Gloves exist to prevent. Doing nothing is the only option
+    // that costs the Traitor neither the charge nor the concealment.
+    if (!canCarry) return;
     if (spendGlove(slot, true)) {
       beginCarry(slot, body.ref, MIN_HOLD, null);
       return;
