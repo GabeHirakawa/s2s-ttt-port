@@ -25,6 +25,7 @@ import { printLogsTo } from "./game/logger";
 import { allBodies } from "./cs2/bodies";
 import { Entity } from "@s2script/sdk/entity";
 import { damageDiag, killWithGadget } from "./cs2/combat";
+import { applyMapContext, clearMapContexts } from "./cs2/feedback";
 import { Voice } from "@s2script/sdk/voice";
 import { Menu, MenuCancelReason, MenuStyle } from "@s2script/sdk/menu";
 import { adminSetKarma, karmaOf, timeoutRemaining } from "./karma/karma";
@@ -601,7 +602,56 @@ export function registerCommands(commands: CtxCommands): void {
     cmd.reply(msgFor(me, "CMD_MYROLE_SET", roleNameFor(me, role)));
   });
 
-  commands.registerAdmin("sm_ttt_setrole", ADMFLAG.GENERIC, (cmd) => {
+  /*
+   * `ttt_context [traitor|detective|innocent|clear]` — force a role's map context onto your own
+   * pawn, the port of the C#'s `settarget` test command.
+   *
+   * It exists to separate two questions that otherwise fail identically. TTT-aware maps gate their
+   * traitor-only doors on `filter_activator_context`, and if the context never reaches the pawn the
+   * filter rejects EVERY activator — so a broken deal path and a map that never had the filter both
+   * present as "the door does nothing for anybody". This applies the context with no role deal
+   * involved: if the door then opens, the mechanism is sound and the fault is upstream in the deal;
+   * if it still does nothing, the deal was never the problem.
+   */
+  commands.registerAdmin("sm_ttt_context", ADMFLAG.ROOT, (cmd) => {
+    const me = cmd.callerSlot;
+    // A context is applied to a pawn, and the console does not have one.
+    if (me < 0) {
+      cmd.reply(msgFor(me, "GENERIC_PLAYER_ONLY"));
+      return;
+    }
+
+    const want = cmd.arg(0).toLowerCase();
+    if (want === "clear") {
+      clearMapContexts(me);
+      cmd.reply("cleared TRAITOR, DETECTIVE and INNOCENT from your pawn");
+      return;
+    }
+
+    const role =
+      want === "" || want === "traitor" ? RoleId.Traitor
+      : want === "detective" ? RoleId.Detective
+      : want === "innocent" ? RoleId.Innocent
+      : RoleId.None;
+    if (role === RoleId.None) {
+      cmd.reply(msgFor(me, "GENERIC_USAGE", "ttt_context [traitor|detective|innocent|clear]"));
+      return;
+    }
+
+    const applied = applyMapContext(me, role);
+    cmd.reply(
+      applied === ""
+        ? "no live pawn to put a context on"
+        : `applied ${applied}:1 to your pawn (replacing any role context already on it)`,
+    );
+  });
+
+  // ROOT, not GENERIC: this writes the registry DIRECTLY and never emits `roleAssign`, so it hands
+  // out a role that exists only in the bookkeeping — no map context, no icon or glow, no uniform, no
+  // loadout, no team switch. That is useful for exercising karma and the win checks, and actively
+  // misleading for anything else, which is not a footgun to leave on a generic admin flag. Use
+  // `ttt_context` to test map integrations and `ttt_myrole` to reserve a real role for the next deal.
+  commands.registerAdmin("sm_ttt_setrole", ADMFLAG.ROOT, (cmd) => {
     const slot = cmd.argInt(0, -1);
     const roleName_ = cmd.arg(1).toLowerCase();
     const role =

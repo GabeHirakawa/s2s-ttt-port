@@ -75,7 +75,7 @@ function flashRoleColor(slot: number, role: RoleId): void {
 }
 
 /** Strip every role context from a pawn. */
-function clearMapContexts(slot: number): void {
+export function clearMapContexts(slot: number): void {
   const pawn = pawnOf(slot);
   if (pawn === null || !pawn.isValid) return;
   for (let i = 0; i < ALL_CONTEXTS.length; i++) {
@@ -83,12 +83,17 @@ function clearMapContexts(slot: number): void {
   }
 }
 
-/** Tag the pawn so TTT-aware maps can gate their entity logic on the player's role. */
-function applyMapContext(slot: number, role: RoleId): void {
+/**
+ * Tag the pawn so TTT-aware maps can gate their entity logic on the player's role.
+ *
+ * Returns the keyword applied, or "" if there was nothing to apply or no pawn to apply it to — the
+ * diagnostic command reports that back, since "did this land?" is the whole question it exists for.
+ */
+export function applyMapContext(slot: number, role: RoleId): string {
   const keyword = contextFor(role);
-  if (keyword === "") return;
+  if (keyword === "") return "";
   const pawn = pawnOf(slot);
-  if (pawn === null || !pawn.isValid) return;
+  if (pawn === null || !pawn.isValid) return "";
   // CLEAR BEFORE ADDING. Contexts are keyed, so `AddContext INNOCENT:1` does not displace a
   // `TRAITOR:1` already standing — the pawn simply holds both, and a map filter testing TRAITOR
   // still waves the player into the traitor room. That happens whenever a role is rewritten on a
@@ -96,6 +101,7 @@ function applyMapContext(slot: number, role: RoleId): void {
   // same I/O pump in the order fired, so the removes are serviced before the add.
   clearMapContexts(slot);
   pawn.ref.acceptInput("AddContext", `${keyword}:1`);
+  return keyword;
 }
 
 /**
