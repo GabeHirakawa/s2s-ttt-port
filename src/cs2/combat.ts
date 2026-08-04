@@ -18,7 +18,8 @@
  */
 
 import { cfg } from "../core/cvars";
-import { nextFrame } from "@s2script/sdk/timers";
+
+import { nextPreFrame } from "../core/preframe";
 import { Player, type MatchStats } from "@s2script/cs2";
 // `HookResult` comes from the events package, NOT from `@s2script/cs2` — even though cs2's `index.d.ts`
 // re-exports it (`export { HookResult } from "@s2script/sdk/events"`) and so type-checks perfectly
@@ -230,7 +231,6 @@ function bump(ms: MatchStats, field: StatField, delta: number): boolean {
   ms[field] = next;
   return true;
 }
-
 
 /**
  * Undo everything the engine wrote for this death, and bank what is owed back at round end.
@@ -450,7 +450,7 @@ export function killWithGadget(
   // "handled, but nobody to credit", which must still be distinguishable from "not a gadget kill".
   gadgetHandledKiller[victim] = killer >= 0 ? killer : -2;
   const dying = victim;
-  void nextFrame().then(() => { pawnOf(dying)?.slay(); });
+  nextPreFrame(() => { pawnOf(dying)?.slay(); });
 }
 
 /**
@@ -751,7 +751,12 @@ function handleDeath(
       // replacement exists.
       const corpse = body;
       const victimSlot = victim;
-      void nextFrame().then(() => {
+      // PRE, not POST — the C# runs the same pass from `Server.NextWorldUpdate`
+      // (`BodySpawner.correctRagdoll`), which drains pre-simulation. `settleBody` re-parents and
+      // teleports a live ragdoll and `setPawnAlpha` rewrites a networked field on a pawn every client
+      // holds; doing that in the POST drain puts both between the engine freeing indices and the
+      // snapshot. See core/preframe.ts.
+      nextPreFrame(() => {
         if (!corpse.ref.isValid()) return;
         // Both steps are individually switchable — see `sm_ttt_body_settle` / `sm_ttt_body_hidepawn`.
         // Clients have hard-crashed with `CopyExistingEntity: missing client entity N` on kills, and

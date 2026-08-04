@@ -13,7 +13,8 @@
 import { CsItem } from "@s2script/cs2";
 import type { Weapon } from "@s2script/cs2";
 import { pawnOf } from "./pawn";
-import { nextFrame } from "@s2script/sdk/timers";
+
+import { nextPreFrame } from "../core/preframe";
 
 /**
  * A held weapon. Alias of the SDK's `Weapon`, kept as a name the rest of the port already uses.
@@ -283,7 +284,7 @@ export function replaceInSlot(
   reserve?: number,
 ): void {
   clearSlot(slot, gearSlot);
-  void nextFrame().then(() => {
+  nextPreFrame(() => {
     give(slot, className, clip, reserve);
   });
 }
@@ -312,7 +313,7 @@ export function giveReplacing(slot: number, classNames: readonly string[]): void
     seen.add(gear);
     clearSlot(slot, gear);
   }
-  void nextFrame().then(() => {
+  nextPreFrame(() => {
     for (let i = 0; i < classNames.length; i++) give(slot, classNames[i]!);
   });
 }

@@ -11,7 +11,7 @@
  * only for players who are actually pressing USE — typically nobody.
  */
 
-import { nextFrame } from "@s2script/sdk/timers";
+import { nextPreFrame } from "../core/preframe";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Vector, forwardVector } from "@s2script/sdk/math";
 import { Server } from "@s2script/sdk/server";
@@ -480,7 +480,7 @@ export function release(slot: number): void {
   // pump rather than running inline, so a teleport issued here would be overwritten when
   // EnableMotion actually lands.
   const dropped = held;
-  void nextFrame().then(() => {
+  nextPreFrame(() => {
     if (dropped.isValid()) dropped.teleport(null, null, [0, 0, 0]);
   });
 }

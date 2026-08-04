@@ -14,7 +14,8 @@
  *    and a fresh logger. Rounds here mutate module state and reset it.
  */
 
-import { delay, nextFrame } from "@s2script/sdk/timers";
+import { delay } from "@s2script/sdk/timers";
+import { nextPreFrame } from "../core/preframe";
 import { Server } from "@s2script/sdk/server";
 import { GameRules, RoundEndReason, Teams } from "@s2script/cs2";
 import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
@@ -234,7 +235,7 @@ function beginRound(attempt = 0): void {
   // last attempt the round starts with whoever IS alive.
   if (pending > 0 && attempt < SPAWN_SETTLE_FRAMES) {
     const mine = epoch;
-    void nextFrame().then(() => {
+    nextPreFrame(() => {
       if (mine !== epoch || game.state !== GameState.Countdown) return;
       beginRound(attempt + 1);
     });

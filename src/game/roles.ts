@@ -19,7 +19,8 @@ import type { TttEvents } from "../core/events";
 import { setArmor, setHealth, tell, toSpectator } from "../cs2/pawn";
 import { clearSlot, give, resolveWeapon, slotOf, stripToSidearms } from "../cs2/inventory";
 import { applyRoleTeam } from "./teams";
-import { nextFrame } from "@s2script/sdk/timers";
+
+import { nextPreFrame } from "../core/preframe";
 
 /** The display name for a role, resolved through the phrase table. */
 export function roleName(role: RoleId): string {
@@ -146,12 +147,13 @@ function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: num
     // One round only: a reservation is spent whether or not it was what put them here.
     reserved[slot] = RoleId.None;
     // Team first: `switchTeam` may respawn the pawn, which would discard health/armor/weapons
-    // written before it. Only the Detective actually moves here (everyone else is already on T
-    // from the countdown), so at most one player pays the extra frame.
+    // written before it. `applyRoleTeam` now switches EVERY dealt player (C# parity — see the note
+    // there on why the Detective-only short-circuit was the crash), so every player pays the extra
+    // frame rather than just one. That is the point: uniform churn, no odd pawn out.
     if (applyRoleTeam(slot, ev.role)) {
       const target = slot;
       const role = ev.role;
-      void nextFrame().then(() => {
+      nextPreFrame(() => {
         if (reg.roleOf(target) === role) applyLoadout(target, role);
       });
     } else {
@@ -214,7 +216,7 @@ export function applyLoadout(slot: number, role: RoleId): void {
   const weapons = cfg.roleWeapons[role]!;
   if (weapons.length === 0) return;
   for (let i = 0; i < weapons.length; i++) clearSlot(slot, slotOf(resolveWeapon(weapons[i]!)));
-  void nextFrame().then(() => {
+  nextPreFrame(() => {
     // Re-check the role: a karma timeout or an admin rewrite between the two frames must not arm
     // someone for a role they no longer hold.
     if (reg.roleOf(slot) !== role) return;

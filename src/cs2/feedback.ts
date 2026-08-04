@@ -11,7 +11,8 @@
  */
 
 import { Fade } from "@s2script/cs2";
-import { nextFrame } from "@s2script/sdk/timers";
+
+import { nextPreFrame } from "../core/preframe";
 import { cfg } from "../core/cvars";
 import { GameState, RoleId } from "../core/enums";
 import * as reg from "../core/registry";
@@ -125,7 +126,7 @@ export function applyMapContext(slot: number, role: RoleId): string {
  */
 function scheduleMapContext(slot: number, role: RoleId, retries: number): void {
   if (contextFor(role) === "") return;
-  void nextFrame().then(() => {
+  nextPreFrame(() => {
     // The role may have been re-dealt (or the player cut) while we waited.
     if (reg.roleOf(slot) !== role) return;
     const pawn = pawnOf(slot);

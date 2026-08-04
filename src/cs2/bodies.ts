@@ -277,6 +277,12 @@ function removeBody(body: Body): void {
   // before clients are told the old entity died, which is what produces
   // `CopyExistingEntity: missing client entity N`. Matches the C#, which uses AcceptInput("Kill")
   // for every teardown.
+  //
+  // TRACED. The crash is an index RECYCLE — one entity freed, another handed the same index — so a
+  // trace that records only creates can never show the pair. Four crash indices so far (613, 639,
+  // 666, 670) fell in gaps between traced creates, which is exactly what a missing free record looks
+  // like: the index was ours, we just never logged letting go of it.
+  console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE free corpse slot=${String(body.owner)} index=${String(body.index)}`);
   body.ref.acceptInput("Kill");
   byIndex.delete(body.index);
   if (byOwner.get(body.owner) === body) byOwner.delete(body.owner);
@@ -286,7 +292,13 @@ function removeBody(body: Body): void {
 
 /** Drop every tracked body. `removeEntities` also deletes the ragdolls. */
 export function clearBodies(removeEntities: boolean): void {
-  if (removeEntities) for (let i = 0; i < bodies.length; i++) bodies[i]!.ref.acceptInput("Kill");
+  if (removeEntities) {
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
+      console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE free corpse slot=${String(b.owner)} index=${String(b.index)} (bulk)`);
+      b.ref.acceptInput("Kill");
+    }
+  }
   bodies.length = 0;
   byIndex.clear();
   byOwner.clear();

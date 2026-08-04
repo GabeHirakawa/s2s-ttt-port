@@ -23,7 +23,8 @@ import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
 import { Beam, Fade, wrapEntity, type BeamHandle } from "@s2script/cs2";
 import { hudLine, HUD_FONT_BIG, HUD_FONT_SMALL, setCenterHud } from "../cs2/hud";
 import { Server } from "@s2script/sdk/server";
-import { nextFrame } from "@s2script/sdk/timers";
+
+import { nextPreFrame } from "../core/preframe";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { b, n, s } from "../core/cvars";
 import { msg, msgFor } from "../core/msgs";
@@ -311,7 +312,7 @@ export function grantTaser(slot: number): void {
   removeByDef(slot, TASER_DEF);
   // Deferred a frame: the removal does not free the slot until then, so a same-frame give produced a
   // taser in hand AND one on the floor.
-  void nextFrame().then(() => {
+  nextPreFrame(() => {
     give(slot, cls);
   });
 }
@@ -1114,7 +1115,6 @@ function tickPoison(dt: number): void {
 
 // ── compass ──────────────────────────────────────────────────────────────────
 let compassAccum = 0;
-
 
 /** Filler cell — the C# `TextCompass` default. */
 const COMPASS_FILLER = "·";

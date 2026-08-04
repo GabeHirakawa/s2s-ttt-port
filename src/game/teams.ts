@@ -89,9 +89,22 @@ export function resetTeamsToT(): void {
  */
 export function applyRoleTeam(slot: number, role: RoleId): boolean {
   if (role === RoleId.None || role === RoleId.Spectator) return false;
-  const want = teamForRole(role);
-  if (teamOf(slot) === want) return false;
-  switchTeam(slot, want);
+  // UNCONDITIONAL, matching the C#. `RoleIconsHandler.OnAssigned` calls `player.SwitchTeam(...)` for
+  // every player it deals, without testing the current team.
+  //
+  // This used to short-circuit on `teamOf(slot) === want`, which looks like a free optimisation and
+  // is not. Everyone is pulled onto T by the countdown, so the guard meant the switch fired for the
+  // DETECTIVE ALONE — the only pawn on the server torn down and rebuilt at the deal, while every
+  // other pawn sat still. `switchTeam` may respawn the pawn, so that released a pawn index (an
+  // entity EVERY client holds, since pawns are never transmit-filtered) one frame before the Traitor
+  // glows — which ARE transmit-filtered — were created and could claim it. A non-Traitor then holds
+  // a stale record at an index the server will never validly describe to them, which is what
+  // `CopyExistingEntity: missing client entity N` reports. Live crashes landed overwhelmingly on
+  // Detectives, and a late joiner dealt Detective (who can never be on the right team already) was
+  // the most reliable repro of all.
+  //
+  // Switching everyone restores the C#'s uniform churn: same treatment, same frame, no odd pawn out.
+  switchTeam(slot, teamForRole(role));
   return true;
 }
 

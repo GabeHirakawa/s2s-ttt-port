@@ -57,7 +57,8 @@ import { Player, wrapEntity, type Pawn } from "@s2script/cs2";
 import { Server } from "@s2script/sdk/server";
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
 import type { PrecacheContext } from "@s2script/sdk/sound";
-import { after, nextFrame } from "@s2script/sdk/timers";
+import { after } from "@s2script/sdk/timers";
+import { nextPreFrame } from "../core/preframe";
 import { Transmit } from "@s2script/sdk/transmit";
 import { Priority, type EventBus } from "../core/bus";
 import { GameState, MAX_SLOTS, RoleId } from "../core/enums";
@@ -67,7 +68,7 @@ import { inProgress } from "../game/game";
 import { roleName } from "../game/roles";
 import { cfg } from "../core/cvars";
 import { ROLE_COLORS, type Rgb } from "./color";
-import { pawnOf, noteAppliedModel } from "./pawn";
+import { pawnOf, noteAppliedModel, clearAppliedModels } from "./pawn";
 
 /**
  * Height above the pawn ORIGIN (its feet) that the icon is CENTRED on.
@@ -411,7 +412,20 @@ function spawnIcons(slot: number, pawn: Pawn, role: RoleId): boolean {
 
 /** Destroy `slot`'s panels and drop their visibility rules. */
 function removeIcons(slot: number): void {
-  parkIcons(slot);
+  // DESTROY, matching `RoleIconsHandler.removeIcon` — `ent.AcceptInput("Kill")` then `icons[slot] =
+  // null`, unconditionally, with no hiding step anywhere in the reference implementation.
+  //
+  // This parked instead, and parking is a port invention (`e123bf4`) that the C# has no counterpart
+  // for. Its cost is that a dead player's markers stay ALIVE as entities for the rest of the round
+  // and accumulate — one set per death — where the C# frees them the moment you die. Long-lived
+  // transmit-filtered entities are the worst thing to accumulate, because each one is by construction
+  // absent from some clients' tables.
+  //
+  // Freeing here is safe for the same reason it is safe in the C#: `Kill` is an entity-I/O input, so
+  // the index is not released in this frame — the engine tears the entity down during the NEXT
+  // frame's simulation, after the deletion has been networked. That is the whole reason every
+  // teardown in both codebases uses `Kill` rather than a direct remove.
+  destroyIcons(slot);
 }
 
 /**
@@ -434,6 +448,15 @@ function parkIcons(slot: number): void {
     const ent = icons[base + i];
     if (ent === null) continue;
     if (!ent.isValid()) {
+      // TRACED, and this line is the whole question. We never free a marker between rounds — the
+      // teardown is `parkAllIcons`, and `destroyIcons` runs on map change only. So a ref that has gone
+      // invalid here was destroyed by SOMETHING ELSE, and the only candidate is the engine's own
+      // round-restart purge. That matters because it is an uncontrolled teardown: the index is
+      // released without the `Kill` input that lets the engine network the deletion first, and these
+      // entities are parked (transmit []) when it happens, so a client that once had one may never be
+      // told it died. The trace already shows those indices coming back as corpses (918, 657, 662),
+      // which is `CopyExistingEntity: missing client entity N` waiting to happen.
+      console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE reap slot=${String(slot)} part=${String(i)} — ref died without us killing it`);
       icons[base + i] = null;
       continue;
     }
@@ -545,60 +568,76 @@ function refreshTraitorIcons(): void {
 }
 
 /**
- * Apply the uniform and the icon, one frame after the role was dealt.
+ * Apply the icon in the DEAL FRAME and the uniform on the next one — the C# timing exactly.
  *
- * `applyRoleTeam` runs `switchTeam` immediately after the `roleAssign` dispatch and the engine MAY
- * respawn the pawn inside that call, which puts it back in the staging list. `SetModel`/`SetParent`
- * on a staged pawn segfaults even though the ref reads live — the C# hit the same assertion and
- * solved it the same way, by deferring to the next world update. `retries` covers the case where
- * the respawn has not finished by then.
+ * `RoleIconsHandler.OnAssigned` calls `assignIcon(player, ev.Role)` synchronously, right after
+ * `SwitchTeam`, and wraps only `SetModel` in `Server.NextWorldUpdate`. This used to defer BOTH by
+ * wrapping the whole body in `nextFrame`, which preserved their relative order but shifted the pair
+ * a frame late — and that shift is not cosmetic.
+ *
+ * `switchTeam` may respawn the pawn, releasing a pawn index. A pawn is an entity EVERY client holds,
+ * because pawns are never transmit-filtered. In the deal frame that index has not reached the
+ * allocator's free list yet; ONE FRAME LATER it has — which is precisely when the old code created
+ * the Traitor glows, and those ARE transmit-filtered. A glow claiming a just-freed pawn index leaves
+ * every non-Traitor holding a stale record at an index the server will never validly describe to
+ * them: `CopyExistingEntity: missing client entity N`. Spawning in the deal frame closes that window
+ * the same way the C# does — by never opening it.
+ *
+ * `retries` covers the staged pawn. `SetModel`/`SetParent` on a pawn still in the staging list
+ * segfaults even though the ref reads live, and a staged pawn reports a null `origin` which
+ * `spawnIcons` treats as "cannot place a panel". Retrying next frame is strictly better than the C#,
+ * which simply loses the icon in that case.
  */
 function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
-  void nextFrame().then(() => {
-    // The role may have been re-dealt (or the player cut) while we waited.
-    if (reg.roleOf(slot) !== role) return;
-    const pawn = pawnOf(slot);
-    if (pawn === null || !pawn.isValid) {
-      if (retries > 0) applyRoleVisuals(slot, role, retries - 1);
+  // The role may have been re-dealt (or the player cut) if we got here via a retry.
+  if (reg.roleOf(slot) !== role) return;
+
+  const pawn = pawnOf(slot);
+  const wantsIcon = role === RoleId.Traitor || role === RoleId.Detective;
+  // `origin` is only required for placing a panel, so an Innocent (no icon) is not held up by a
+  // staged pawn — their model swap still needs to happen.
+  const ready = pawn !== null && pawn.isValid && (!wantsIcon || pawn.origin !== null);
+  if (!ready) {
+    if (retries > 0) {
+      nextPreFrame(() => applyRoleVisuals(slot, role, retries - 1));
       return;
     }
+    console.log(`[ttt] WARN: pawn never left staging slot=${slot} role=${role}`);
+    return;
+  }
 
-    // Panels FIRST, model swap second — and the swap on the FOLLOWING frame.
-    //
-    // This is the C# order (`assignIcon` synchronous, `SetModel` inside `NextWorldUpdate`) and it is
-    // load-bearing, not stylistic. `setModel` puts the pawn back in the staging list, and a staged
-    // pawn reports a null `origin` — which `spawnIcons` treats as "cannot place a panel" and bails
-    // on. Running the swap first therefore destroyed every icon in the mode silently: role assign
-    // reported success, no entity was ever created, and `point_worldtext` sat at 0 with live
-    // Traitors on the server.
-    //
-    // An earlier comment here claimed the reverse — that a model swap rebuilds the skeleton the
-    // panels hang off, so panels had to come second. The C# has run this order in production for
-    // years; the panels survive the swap.
-    if (role === RoleId.Traitor || role === RoleId.Detective) {
-      if (spawnIcons(slot, pawn, role)) {
-        // A Detective icon gets NO rule: visible to everyone, late joiners included.
-        if (role === RoleId.Traitor) refreshTraitorIcons();
-        // Fade the glow, keep the panel. Re-checked on expiry because a karma rewrite, a death or a
-        // whole new round can land inside the window — and `parkGlow` must not fire against markers
-        // that now belong to a different role.
-        const secs = cfg.roleGlowSeconds;
-        if (secs > 0) {
-          after(secs * 1000, () => {
-            if (reg.roleOf(slot) === role) parkGlow(slot);
-          });
-        }
-      } else {
-        console.log(`[ttt] WARN: icon spawn failed slot=${slot} role=${role}`);
+  // Panels FIRST, model swap second — and the swap on the FOLLOWING frame. Load-bearing, not
+  // stylistic: `setModel` puts the pawn back in the staging list, and a staged pawn reports a null
+  // `origin` which `spawnIcons` bails on. Running the swap first silently destroyed every icon in
+  // the mode — role assign reported success, no entity was ever created, and `point_worldtext` sat
+  // at 0 with live Traitors on the server.
+  if (wantsIcon) {
+    if (spawnIcons(slot, pawn, role)) {
+      // A Detective icon gets NO rule: visible to everyone, late joiners included.
+      if (role === RoleId.Traitor) refreshTraitorIcons();
+      // Fade the glow, keep the panel. Re-checked on expiry because a karma rewrite, a death or a
+      // whole new round can land inside the window — and `parkGlow` must not fire against markers
+      // that now belong to a different role.
+      const secs = cfg.roleGlowSeconds;
+      if (secs > 0) {
+        after(secs * 1000, () => {
+          if (reg.roleOf(slot) === role) parkGlow(slot);
+        });
       }
+    } else {
+      console.log(`[ttt] WARN: icon spawn failed slot=${slot} role=${role}`);
     }
+  }
 
-    void nextFrame().then(() => {
-      const later = pawnOf(slot);
-      if (later === null || !later.isValid || reg.roleOf(slot) !== role) return;
-      const applied = roleModel(role);
-      if (later.ref.setModel(applied)) noteAppliedModel(slot, applied);
-    });
+  // PRE, not POST. The C# defers this identically — `Server.NextWorldUpdate(() => SetModel(...))` —
+  // and that drains pre-simulation. `nextFrame()` would drain POST, between the engine releasing
+  // indices and the snapshot going out. `setModel` re-stages a pawn every client holds, so the phase
+  // matters more here than almost anywhere else in the mode.
+  nextPreFrame(() => {
+    const later = pawnOf(slot);
+    if (later === null || !later.isValid || reg.roleOf(slot) !== role) return;
+    const applied = roleModel(role);
+    if (later.ref.setModel(applied)) noteAppliedModel(slot, applied);
   });
 }
 
@@ -821,14 +860,27 @@ export function installIcons(bus: EventBus<TttEvents>): void {
       // transition, a full countdown before any marker is spawned and the one boundary where nothing
       // else is being created. A survivor at this point can only come from a hot reload, and it
       // is parked rather than freed — hiding costs a transmit rule, freeing costs a client.
-      parkIcons(slot);
-      // Recorded before the panels exist: every Traitor is dealt in this same frame, so by the
-      // time the deferred spawns run the set is complete and one refresh covers all of them.
+      // DESTROY at the deal, matching `RoleIconsHandler.OnAssigned` — which opens with
+      // `removeIcon(player.Slot)` before it switches team or spawns anything, every single time.
+      //
+      // This parked, on the theory that freeing an index in the frame new markers are spawned lets
+      // the engine hand it straight back out. `Kill` makes that impossible: it goes through entity
+      // I/O, so the index is not released until the NEXT frame's simulation, by which point the
+      // deletion has been networked. The C# has run destroy-then-spawn in one synchronous handler
+      // for years on exactly that guarantee.
+      destroyIcons(slot);
+      // Recorded BEFORE `applyRoleVisuals` so this slot is already in the viewer set its own glow is
+      // restricted to. Icons now spawn in this frame rather than the next, so `traitors` grows as the
+      // deal proceeds and each new Traitor's `refreshTraitorIcons` re-pushes the widened list onto
+      // every glow spawned so far — the last Traitor dealt leaves all of them correct. Every Traitor
+      // is dealt in this same frame, so that convergence completes before anyone sees a snapshot.
       // Bounded at 64 because `setVisibleTo` throws RangeError on a viewer outside [0, 64).
       if (role === RoleId.Traitor && slot >= 0 && slot < 64 && traitors.indexOf(slot) < 0) {
         traitors.push(slot);
       }
-      applyRoleVisuals(slot, role, 1);
+      // Three retries, not one: the spawn is synchronous now, so a pawn that `switchTeam` respawned
+      // may still be in the staging list on this frame and needs a couple to come out of it.
+      applyRoleVisuals(slot, role, 3);
 
     },
     // MONITOR so the icon shows the role karma may have rewritten, not the one first dealt.
@@ -876,7 +928,30 @@ export function installIcons(bus: EventBus<TttEvents>): void {
         // Round start: kill last round's icons and put every tagged name back BEFORE `beginRound`
         // refreshes the registry's name cache off the engine — otherwise "[T] Bob" becomes the
         // name TTT believes Bob has.
-        parkAllIcons();
+        //
+        // DESTROY, not park. `parkAllIcons` argued that freeing an index at the Countdown boundary
+        // was the crash, because that is when players respawn and a released index gets claimed
+        // almost immediately. The live trace showed the premise is incomplete: parking does not keep
+        // the entity alive, it only stops US being the one to end it. The engine's round-restart
+        // purge takes them anyway —
+        //
+        //   t=1469.17 ENTTRACE reap slot=11 part=3 — ref died without us killing it
+        //
+        // — and that purge releases the index WITHOUT the `Kill` input, the one thing that makes the
+        // engine network the deletion before recycling. Measured on the live server: this cut `reap`
+        // from ~18 per 10min to ~2 while controlled teardowns rose 10x, and it produced the longest
+        // crash-free run of the session. `clearAllIcons` kills every part, children first.
+        clearAllIcons();
+        // Invalidate the applied-model cache, which its own doc says happens "on map change and
+        // round reset" and which NOTHING was calling — `clearAppliedModels` had zero call sites.
+        //
+        // That is not cosmetic. `bodies.ts` builds a corpse from `appliedModelOf(slot) ?? roleModel(role)`,
+        // and `??` only falls through on NULL. Once a slot had any cached model the fallback was dead
+        // for the rest of the map, so a player whose deferred `setModel` failed — most likely the
+        // Detective, whose pawn `switchTeam` may have just re-staged — got a corpse built from LAST
+        // round's uniform. A CT ragdoll for a player wearing Phoenix, or the reverse, which is exactly
+        // the "mismatched skeleton" that file warns about networking.
+        clearAppliedModels();
         stickers.fill(0);
         const active = reg.activeSlots();
         for (let i = 0; i < active.length; i++) clearRoleTag(active[i]!);

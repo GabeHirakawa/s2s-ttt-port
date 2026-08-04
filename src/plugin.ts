@@ -38,6 +38,7 @@
 
 import { plugin } from "@s2script/sdk/plugin";
 import { Server } from "@s2script/sdk/server";
+import { clearPreFrame, drainPreFrame } from "./core/preframe";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { GameState, RoleId, Team } from "./core/enums";
 import { EventBus, Priority } from "./core/bus";
@@ -429,6 +430,8 @@ export default plugin((ctx) => {
     // on the engine names here, and `resetIcons` is what puts the originals back. Seeding first
     // would cache "[T] Bob" as Bob's real name and add a bracket on every map change.
     resetIcons();
+    // Drop anything queued for a pre-frame that will never come — see core/preframe.ts.
+    clearPreFrame();
     clearReservedRoles();
     reg.seedFromEngine();
     // Only clears the one-shot latch — the zones themselves are not spawned yet, so the removal
@@ -469,6 +472,10 @@ export default plugin((ctx) => {
   ctx.server.onGameFrame(() => { tickSpoof(); }, { phase: "post" });
 
   ctx.server.onGameFrame(() => {
+    // FIRST, and before anything reads entity state: run work deferred to "next frame, pre-simulation"
+    // (the `Server.NextWorldUpdate` equivalent). This subscription passes no `phase`, and core defaults
+    // a subscription to Pre — which is the whole point. See core/preframe.ts.
+    drainPreFrame();
     const now = Server.gameTime;
     const dt = now - lastTime;
     lastTime = now;
@@ -523,6 +530,8 @@ export default plugin((ctx) => {
       clearBenched();
       // Drops the role icons and puts every tagged name back: an unload must not leave "[T] Bob".
       resetIcons();
+    // Drop anything queued for a pre-frame that will never come — see core/preframe.ts.
+    clearPreFrame();
     clearReservedRoles();
       unmuteAll();
       reg.resetRegistry();
