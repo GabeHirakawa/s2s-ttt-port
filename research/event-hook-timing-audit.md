@@ -23,8 +23,9 @@ The strongest reconstruction of the historical fatal is an entity-index identity
 was not separated by a client-visible deletion:
 
 1. a team switch, entity I/O `Kill`, or malformed spawn retires or destabilizes an entity;
-2. another networked entity is created after simulation but before the next snapshot, or a
-   transmit-filtered entity claims the newly available index;
+2. another networked entity is created in POST after simulation, or a transmit-filtered entity
+   claims the newly available index; its exact ordering relative to snapshot construction is not
+   established;
 3. at least one client did not receive a compatible create/delete sequence for that index;
 4. its next delta tries to copy/update an entity record that does not exist, producing
    `CopyExistingEntity: missing client entity N`.
@@ -37,8 +38,9 @@ contributed. They should not be collapsed into one “proven engine bug.”
 
 The plugin’s `nextPreFrame` change is directionally correct but incomplete. Four `delay(...).then`
 continuations still run in s2script’s POST async drain. All four can directly or indirectly reach
-round transitions that create, kill, respawn, switch teams, strip/give weapons, and rewrite
-transmit state. The only `after` callback also changes transmit rules in POST. This directly
+round transitions that kill, respawn, switch teams, strip/give weapons, rewrite transmit state, and
+are intended to create role entities once the separate role-commit bug is fixed. The only `after`
+callback also changes transmit rules in POST. This directly
 violates the plugin’s own documented rule that entity work must run PRE.
 
 The checked-in package lock is also incompatible with the checked-in source. It pins
@@ -67,7 +69,8 @@ The focused framework audit found four additional current-main defects:
   `Allowed`;
 - `MAX_NEST = 8` limits recorded callback tokens, not recursion depth: overflow calls reuse the
   eighth token and continue nesting;
-- `Client.kick` is not wrapped in the outbound nest, so disconnect notification is deferred;
+- `Client.kick` is not wrapped in the outbound nest, so a synchronous disconnect callback would
+  defer; the engine callback timing is not live-proven;
 - the nest token is extracted by scanning the private, non-`repr(C)` memory layout of
   `FunctionCallbackArguments`, making rusty_v8 layout drift a process-crash risk.
 
@@ -77,12 +80,12 @@ Since `rotateRoles` first clears every live role, the visual handler exits on ev
 assignment. Correcting only that guard would reactivate the POST-phase team/icon churn above; the
 event commit boundary and scheduling must be fixed together.
 
-Finally, current s2script main has a concrete scoped-recipient regression. `Hook_FireEventPre`
-sets `s_legacyFilterActive`, calls `FireEvent`, then immediately clears the filter. The adjacent
-comment says that exact strategy was proven not to work because the client message is flushed later,
-and claims `Hook_GameFramePost` clears it; the current POST hook performs no such clear. This is a
-high-confidence kill-feed/privacy defect. A frame-global mask would still need event correlation to
-handle multiple or nested suppressed events safely.
+Finally, current s2script main has an unresolved scoped-recipient contradiction.
+`Hook_FireEventPre` sets `s_legacyFilterActive`, calls `FireEvent`, then immediately clears the
+filter. One adjacent comment says posts are synchronous and the original PR reports a successful
+live gate; another says immediate clear never worked and that frame POST clears the flag, which the
+current POST hook does not do. The source alone cannot decide which timing the live build took.
+This needs a renewed live gate before being called either correct or broken.
 
 ## Evidence table
 
@@ -100,11 +103,11 @@ handle multiple or nested suppressed events safely.
 | Plugin-originated engine calls have a nested JS path | Mechanism proven; safety gaps remain | High | [PR #108](https://github.com/s2script/s2script/pull/108) introduced `NestGuard`/`CallbackScope`; current source contains an ineffective depth cap, a private-layout token scan, one unwrapped kick path, and divergent acquire behavior ([`nest.rs` L17-L75](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/nest.rs#L17-L75)). |
 | EntityRef rejects stale/recycled handles across maps | Proven on current main | High | Entity books key index to host id + engine serial and serial-check deletes ([`entity_live.rs` L1-L73](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/entity_live.rs#L1-L73)); map clear occurs before JS ([`ffi.rs` L180-L202](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/ffi.rs#L180-L202)). |
 | Event objects cannot survive a synchronous handler | Proven contract | High | Published SDK says fields must be read before `await` ([`events.d.ts` L1-L30](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/packages/sdk/events.d.ts#L1-L30)); deferred events duplicate/free the native event ([`events.rs` L389-L417](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/events.rs#L389-L417)). TTT reads event fields synchronously. |
-| Current scoped-recipient implementation clears its filter too soon | Proven code regression; effect backed by first-party live record | High | Current code clears at once while adjacent comment says this failed ([`s2script_mm.cpp` L5415-L5455](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/shim/src/s2script_mm.cpp#L5415-L5455)); [PR #46](https://github.com/s2script/s2script/pull/46) records the live-gated intended behavior. |
+| Scoped-recipient timing is internally contradictory | Unresolved; must be re-live-gated | Medium | Current code clears at once; one comment says posts are synchronous, another says immediate clear failed and POST clears it ([`s2script_mm.cpp` L5358-L5455](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/shim/src/s2script_mm.cpp#L5358-L5455)). [PR #46](https://github.com/s2script/s2script/pull/46) reports successful live filtering. |
 | TTT source and lockfile use incompatible SDK surfaces | Proven | High | Lock pins 0.11.0/0.11.1 ([`package-lock.json` L619-L654](https://github.com/GabeHirakawa/s2s-ttt-port/blob/b557e9d61f91a1ecfb1a99590756df59ef30383a/package-lock.json#L619-L654)); published [`sdk-0.11.0.tgz`](https://registry.npmjs.org/@s2script/sdk/-/sdk-0.11.0.tgz) lacks frame `phase` and `Events.setRecipients`, while source uses explicit POST ([`plugin.ts` L461-L478](https://github.com/GabeHirakawa/s2s-ttt-port/blob/b557e9d61f91a1ecfb1a99590756df59ef30383a/src/plugin.ts#L461-L478)). |
 | Nested `onCanAcquire` votes are discarded | Proven current-main defect | High | Nested fan-out omits `AFTER_HANDLER`; the host path invokes it ([`dispatch.rs` L17-L36, L211-L284, L390-L394](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/dispatch.rs#L17-L36)). Acquire folding depends on that callback and empty votes fold to `Allowed` ([`v8host.rs` L4042-L4080](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/v8host.rs#L4042-L4080), [`acquire.rs` L36-L64](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/acquire.rs#L36-L64)). |
 | The nesting cap does not cap nesting | Proven current-main defect | High | A refused ninth push leaves eight entries, `with_outbound` still calls the engine, and `top()` returns token eight ([`nest.rs` L17-L75](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/nest.rs#L17-L75)); nested dispatch continues through it ([`dispatch.rs` L191-L208, L309-L313](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/dispatch.rs#L191-L208)). |
-| `Client.kick` omits outbound nesting | Proven current-main timing defect | High | The kick op is called directly ([`client.rs` L196-L205](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/client.rs#L196-L205)), unlike adjacent command ops; a busy notify dispatch becomes `Deferred` ([`dispatch.rs` L397-L400](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/dispatch.rs#L397-L400)). |
+| `Client.kick` omits outbound nesting | Missing wrapper proven; callback consequence unverified | Medium | The kick op is called directly ([`client.rs` L196-L205](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/client.rs#L196-L205)), unlike adjacent command ops; a synchronous busy notify would become `Deferred` ([`dispatch.rs` L397-L400](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/dispatch.rs#L397-L400)), but no live gate proves `KickClient` disconnects before return. |
 | Nesting depends on a private rusty_v8 struct layout | Proven implementation risk | High | `info_ptr` scans a non-`repr(C)` value and treats its first non-null word as `FunctionCallbackInfo` ([`nest.rs` L25-L36](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/nest.rs#L25-L36)); that pointer reaches unsafe `CallbackScope::new` ([`dispatch.rs` L191-L208](https://github.com/s2script/s2script/blob/a835e6c77d2b648392d53686f919738193dbe10b/core/src/dispatch.rs#L191-L208)). |
 | Synchronous role visuals run before the role commit | Proven TTT defect | High | `rotateRoles` clears roles, `assignRoles` emits, then commits with `setRole` ([`roles.ts` L88-L160](https://github.com/GabeHirakawa/s2s-ttt-port/blob/b557e9d61f91a1ecfb1a99590756df59ef30383a/src/game/roles.ts#L88-L160)); the MONITOR listener calls `applyRoleVisuals` inline, whose first check requires the uncommitted role ([`icons.ts` L591-L605, L833-L887](https://github.com/GabeHirakawa/s2s-ttt-port/blob/b557e9d61f91a1ecfb1a99590756df59ef30383a/src/cs2/icons.ts#L591-L605)). |
 | Parallel packing/alternate baselines cause the fatal | Operational hypothesis, not established by available primary source | Low-medium | TTT asserts three mitigation cvars and explains the hypothesis ([`plugin.ts` L172-L187](https://github.com/GabeHirakawa/s2s-ttt-port/blob/b557e9d61f91a1ecfb1a99590756df59ef30383a/src/plugin.ts#L172-L187)); no Valve source, packet trace, or controlled result table was found. |
@@ -126,10 +129,13 @@ However, it is not the only deferred path:
 - finished watchdog `delay` → `returnToWaiting()`;
 - glow `after` → `parkGlow()`/`Transmit.setVisibleTo`.
 
-`beginRound` can respawn, clear bodies, assign roles, switch every team, create icons/glows, strip
-inventory, and enqueue more entity work. `endGame` switches teams, strips weapons, and emits
+`beginRound` can respawn, clear bodies, assign roles, switch every team, strip inventory, and enqueue
+more entity work. Its icon/glow creation is currently blocked by the separate pre-commit guard
+defect; fixing that defect makes the creation path reachable here. `endGame` switches teams, strips
+weapons, and emits
 `Finished`, whose listeners kill/reset effects. When their guard passes immediately, both start
-inside `frame_async_drain`, after simulation and before the outgoing snapshot.
+inside `frame_async_drain`, in POST after simulation. Their exact ordering relative to snapshot
+construction/transmission is not established by the available source.
 
 The required migration pattern is:
 
@@ -180,9 +186,9 @@ required capability (`frame.phase`, `events.scopedRecipients`, `nest.outbound`, 
 generation) is absent. The CLI should also fail when source imports an API newer than the declared
 minimum runtime. TTT should remove optional casts once it requires the matching release.
 
-### Critical — scoped event-recipient filtering is internally contradictory on current main
+### High — scoped event-recipient timing is internally contradictory
 
-Confidence: high.
+Confidence: high that source/comments disagree; low on which timing the live engine uses.
 
 The current shim does this:
 
@@ -193,13 +199,17 @@ The current shim does this:
 
 Lines immediately after the clear say the immediate-clear implementation “never fired once”
 because client-bound messages are batched, and claim `Hook_GameFramePost` performs the clear.
-`Hook_GameFramePost` only dispatches the frame hook. This is a concrete code/comment regression from
-the live-gated behavior described in [PR #46](https://github.com/s2script/s2script/pull/46).
+`Hook_GameFramePost` only dispatches the frame hook. However, an earlier adjacent comment says the
+posts occur synchronously inside `FireEvent`, and [PR #46](https://github.com/s2script/s2script/pull/46)
+reports successful per-client filtering from the same implementation. Both comments and the clear
+were introduced together, so this is not evidence of a later regression; it is contradictory
+first-party evidence that source inspection cannot resolve.
 
-Simply moving the clear to frame POST is not a complete design: two suppressed events in one frame
-can overwrite one frame-global mask, and nested events can consume the wrong one. The filter must be
-correlated to the actual legacy-game-event post, e.g. by an event sequence/token or a FIFO of
-pending `(event identity, allow mask)` records. Required tests:
+Re-run the live gate with timestamps around `FireEvent` and `Hook_PostEvent`. If posts are delayed,
+simply moving the clear to frame POST is not a complete design: two suppressed events in one frame
+can overwrite a frame-global mask, and nested events can consume the wrong one. Correlate a delayed
+post to its event, e.g. by an event sequence/token or a FIFO of pending
+`(event identity, allow mask)` records. Required tests:
 
 - post occurs after `FireEvent` returns;
 - two differently scoped events in one frame;
@@ -208,7 +218,8 @@ pending `(event identity, allow mask)` records. Required tests:
 - `Handled` with no mask;
 - map change/unload while a post is pending.
 
-This defect leaks kill-feed information; it is not itself a `CopyExistingEntity` cause.
+If immediate clear is confirmed to miss the post, the consequence is a kill-feed leak, not a
+`CopyExistingEntity` cause.
 
 ### Critical — nested acquisition handlers run, but their result is discarded
 
@@ -269,12 +280,11 @@ Thus a hot reload can make previously hidden, still-live entities visible before
 teardown is serviced. It also creates a visibility/create/delete burst during the riskiest lifecycle
 window.
 
-Framework options:
-
-1. mark the plugin Unloading and disable inbound callbacks, run `onUnload` while declarative
-   outbound state remains, then sweep transmit/voice state; or
-2. ledger game-world entities with an owner cleanup policy and perform safe entity cleanup before
-   visibility rules are removed.
+Merely moving the framework's owner-store sweep after `onUnload` is insufficient: TTT's
+`resetIcons()` calls `Transmit.resetAll()` in that same hook, immediately after queuing `Kill`.
+Cleanup must be completion-aware. Ledger game-world entities with an owner policy, issue safe
+teardown while the visibility rule remains, and clear the rule only after deletion is observed (or
+at a lifecycle boundary whose deletion/baseline semantics are proven).
 
 This ordering needs an integration test with a hidden entity, a client excluded from its create,
 and a hot reload.
@@ -302,9 +312,11 @@ rusty_v8 accessor/binding. If none exists at the pinned version, isolate the uns
 an exact-version layout gate and startup self-test. A wrong non-null pointer reaches
 `CallbackScope::new`, so this is a process-crash boundary, not merely API compatibility.
 
-Finally, outbound nesting is hand-applied per native. `Client.kick` demonstrably omits it, making
-disconnect observers one frame late. Generate or centralize wrappers for every mutating
-`S2EngineOps` call and explicitly classify any intentionally non-nesting operation.
+Finally, outbound nesting is hand-applied per native. `Client.kick` demonstrably omits it. If the
+engine dispatches disconnect before `KickClient` returns, observers defer by a frame; if disconnect
+is naturally asynchronous, the omission is harmless. Add a live gate, then generate or centralize
+wrappers for every mutating `S2EngineOps` call and explicitly classify intentionally non-nesting
+operations.
 
 TTT’s gadget slay deferral remains defensible as a compatibility path, but the comments should be
 versioned: on a runtime including [PR #108](https://github.com/s2script/s2script/pull/108),
@@ -326,8 +338,8 @@ redispatches the same event. Current s2script exposes `ctx.commands.onClientComm
 
 Likewise `item_purchase` is already post-grant semantically even though TTT observes `FireEvent` in
 PRE mode. The plugin removes the newly created weapon while inside event dispatch and then performs
-its own shop grant. Current s2script’s CS2 package has `ctx.items.onCanAcquire` (merged with
-[PR #108](https://github.com/s2script/s2script/pull/108)); refuse or redirect at acquisition time
+its own shop grant. Current s2script’s CS2 package has `ctx.items.onCanAcquire` (merged through
+[PR #110](https://github.com/s2script/s2script/pull/110)); refuse or redirect at acquisition time
 where possible. This removes a create-then-remove cycle and the need to reason about nested event
 dispatch during the purchase event.
 
@@ -349,18 +361,6 @@ Until the framework owns this:
 - for slot work, capture SteamID/userID or a registry connection generation and compare on run;
 - return a cancel handle;
 - expose queue depth/high-water/drop counters.
-
-### Medium-high — direct `EntityRef.remove()` contradicts the plugin’s teardown rule
-
-Confidence: high for inconsistency; medium for risk.
-
-Almost every plugin-owned network entity is removed via `acceptInput("Kill")` because the repository
-states direct removal can make an index immediately reusable. Buy zones are the exception:
-`removeBuyZones` invokes `.remove()` directly
-([`handlers.ts` L85-L101](https://github.com/GabeHirakawa/s2s-ttt-port/blob/b557e9d61f91a1ecfb1a99590756df59ef30383a/src/cs2/handlers.ts#L85-L101)).
-This is map-start/round-start work rather than high-frequency churn, but it should follow one
-documented lifecycle policy. Prefer `Kill` in PRE, or have the framework expose a clearly named
-safe queued destroy distinct from immediate `UTIL_Remove`.
 
 ### Medium — entity liveness is strong, but raw indices remain weaker identities
 
@@ -446,7 +446,8 @@ Status: best-supported timing reconstruction, not packet-level proof.
 3. The old implementation delayed both icon/glow creation with `nextFrame`, whose continuation runs
    in POST.
 4. The released pawn index became allocator-visible, and a transmit-filtered glow could claim it
-   after simulation but before a client had observed the old pawn’s deletion.
+   in POST after simulation; the hypothesis is that this happened before a client observed the old
+   pawn’s deletion, but snapshot-relative ordering was not captured.
 5. A non-Traitor, from whom the replacement glow was filtered, had no valid replacement record for
    the index; a later delta failed with `CopyExistingEntity`.
 
@@ -491,16 +492,16 @@ cvars and DNA-glow default-off policy remain sensible mitigations, not causal pr
 4. Add map/round/client-generation tokens and bounds/metrics to the manual PRE queue.
 5. Intercept `jointeam` before mutation; move purchase rejection to `onCanAcquire` after its nested
    vote bug is fixed.
-6. Replace direct buy-zone `remove()` with the documented safe destroy path.
-7. Make the internal event bus snapshot and contain each handler.
-8. Validate stored refs whenever resolving a body/effect by raw entity index.
-9. Keep DNA glow off and the three snapshot cvars conservative until a controlled stress gate
+6. Make the internal event bus snapshot and contain each handler.
+7. Validate stored refs whenever resolving a body/effect by raw entity index.
+8. Keep DNA glow off and the three snapshot cvars conservative until a controlled stress gate
    disproves their need.
 
 ### s2script
 
 1. Make nested and host fan-out run identical per-handler acquisition folding.
-2. Fix scoped-recipient correlation and add batched/nested-event tests.
+2. Re-live-gate scoped-recipient timing, reconcile the contradictory comments, and add
+   batched/nested-event tests.
 3. Make the recursion cap real and replace the private-layout callback-info scan.
 4. Centralize outbound nesting; include `Client.kick` and audit every mutating engine op.
 5. Ship an owner-ledgered PRE/world-update scheduling API; make timer continuation phase explicit in
@@ -542,6 +543,8 @@ generation callback.
 - The final `b557e9d` and `28c2b83` commit messages both disclose incomplete live verification.
 - No reviewed live gate proves nested `onCanAcquire` denial; the reentry fixture only observes a
   `Continue` handler, and the merge PR reports no live CS2 gate.
+- The source disagrees on whether legacy game-event posts occur inside `FireEvent`; the original PR
+  reports success, so a renewed live trace is required before changing scoped-recipient lifetime.
 - It is unknown whether all `CheckTransmit` calls and transmit-rule writes are main-thread
   serialized when parallel packing is enabled.
 - The claim that alternate baselines are index-keyed without a serial check was not independently
