@@ -14,7 +14,7 @@
   },
   "include": [
     "src",
-    "src/types/s2script-runtime.d.ts",
+    "test",
     ".s2script/gamedata.d.ts",
     "node_modules/@s2script/sdk/globals.d.ts"
   ]

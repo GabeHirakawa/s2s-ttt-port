@@ -47,5 +47,5 @@ Recorded in `research/event-hook-timing-audit.md` if that document is present; o
 ## Plugin runtime pin
 
 TTT source typechecks against published `@s2script/sdk@0.11.0` plus
-`src/types/s2script-runtime.d.ts`. Deploy the host at or after
-`a835e6c77d2b648392d53686f919738193dbe10b`.
+`src/s2script-runtime.d.ts` (`s2s build` only loads top-level `src/*.d.ts`).
+Deploy the host at or after `a835e6c77d2b648392d53686f919738193dbe10b`.
