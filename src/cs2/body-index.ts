@@ -6,7 +6,7 @@
  * importing the engine-backed spawner.
  */
 
-import { refOwnsIndex, type IndexRef } from "../core/index-identity";
+import { refOwnsIndex, type IndexRef } from "../core/index-identity.ts";
 
 /** The fields the index maps need. `Body` satisfies this. */
 export interface BodyIndexRecord {
