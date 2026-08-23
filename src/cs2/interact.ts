@@ -16,6 +16,7 @@ import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Vector, forwardVector } from "@s2script/sdk/math";
 import { Server } from "@s2script/sdk/server";
 import { Entity, type EntityRef } from "@s2script/sdk/entity";
+import { refOwnsIndex } from "../core/index-identity";
 import { Beam, type BeamHandle } from "@s2script/cs2";
 import { Button, GameState, MAX_SLOTS, RoleId } from "../core/enums";
 import { cfg, n } from "../core/cvars";
@@ -69,15 +70,17 @@ const holdDistance = new Float32Array(MAX_SLOTS);
 const usePressed = new Uint8Array(MAX_SLOTS);
 
 /**
- * Entity indices of this round's `prop_physics_multiplayer` props — the port of `onStartUse`'s
+ * This round's `prop_physics_multiplayer` props — the port of `onStartUse`'s
  * `TryGetHitEntityByDesignerName("prop_physics_multiplayer")` test.
  *
  * `EntityRef` exposes no classname, so the designer-name filter has to be turned inside out: the
- * class is resolved once, in bulk, and the trace hit is then a set membership test. Rebuilt at the
- * IN_PROGRESS transition rather than on map start because the engine's round restart re-creates
- * map-placed entities, and never per trace — `tryPickup` runs every frame a player holds USE.
+ * class is resolved once, in bulk, and the trace hit is then a membership test against the stored
+ * ref. A raw index is not enough — the engine recycles numbers, and treating a recycled index as
+ * still a physics prop would DisableMotion a pawn, weapon, or brush. Rebuilt at the IN_PROGRESS
+ * transition rather than on map start because the engine's round restart re-creates map-placed
+ * entities, and never per trace — `tryPickup` runs every frame a player holds USE.
  */
-const physicsProps = new Set<number>();
+const physicsProps = new Map<number, EntityRef>();
 
 let bus: EventBus<TttEvents>;
 
@@ -119,7 +122,19 @@ export function initInteract(eventBus: EventBus<TttEvents>): void {
 function indexPhysicsProps(): void {
   physicsProps.clear();
   const props = Entity.findByClass("prop_physics_multiplayer");
-  for (let i = 0; i < props.length; i++) physicsProps.add(props[i]!.index);
+  for (let i = 0; i < props.length; i++) {
+    const ref = props[i]!;
+    physicsProps.set(ref.index, ref);
+  }
+}
+
+/** True when `index` is still the physics prop snapshotted this round. Evicts a recycled number. */
+function isCarryableProp(index: number): boolean {
+  const ref = physicsProps.get(index);
+  if (ref === undefined) return false;
+  if (refOwnsIndex(ref, index)) return true;
+  physicsProps.delete(index);
+  return false;
 }
 
 /**
@@ -288,7 +303,7 @@ function tryPickup(slot: number): void {
     // The body tracker is the real "is this a prop_ragdoll?" test — every corpse in the mode is one
     // it spawned — and {@link physicsProps} stands in for the second designer-name lookup.
     const index = hit.entity.index;
-    if (bodyByEntity(index) !== undefined || physicsProps.has(index)) {
+    if (bodyByEntity(index) !== undefined || isCarryableProp(index)) {
       const dx = hit.endPos.x - origin.x;
       const dy = hit.endPos.y - origin.y;
       const dz = hit.endPos.z - origin.z;

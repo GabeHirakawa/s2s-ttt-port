@@ -32,17 +32,25 @@ sweep TRANSMIT + leftovers
 teardown ledger / dispose context
 ```
 
-## Other host defects (not the hot-reload fatal)
+## Remaining host checklist (not in this repo)
 
 Recorded in `research/event-hook-timing-audit.md` if that document is present; otherwise the
-2026-08-23 audit on `cursor/research-event-hook-timing-3347`:
+2026-08-23 audit on `cursor/research-event-hook-timing-3347`. None of these can land in
+`s2s-ttt-port`; they need s2script PRs.
 
-- Nested `onCanAcquire` fan-out omits `AFTER_HANDLER`, so denials fold to Allowed.
-- `MAX_NEST` refuses a ninth token push but still nests through token eight.
-- `Client.kick` is not wrapped in outbound nesting.
-- Nest token scan depends on a private rusty_v8 layout.
-- Scoped-recipient immediate-clear vs POST-clear comments disagree; re-live-gate.
-- No owner-ledgered `Server.nextWorldUpdate`.
+1. Nested `onCanAcquire` fan-out must record `AFTER_HANDLER` so denials do not fold to Allowed.
+   TTT keeps the `item_purchase` strip fallback until this lands.
+2. Make `MAX_NEST` a real recursion cap (overflow currently reuses token eight and keeps nesting).
+3. Wrap `Client.kick` in outbound nesting; audit every mutating `S2EngineOps` call.
+4. Replace the private rusty_v8 `FunctionCallbackArguments` layout scan with a supported accessor.
+5. Re-live-gate scoped-recipient immediate-clear vs POST-clear; reconcile the contradictory comments.
+6. Ship an owner-ledgered `Server.nextWorldUpdate` (PRE/world-update scheduling API).
+7. Telemetry/assertions for networked create/spawn/remove/reparent/teleport/transmit writes from POST.
+8. Pre-hook priority vs `Stop`, or drop the contract the subscription API cannot express.
+9. Count and identify fail-open pre-hook skips (hook name + same-hook / MAX_NEST reason).
+10. Preserve transmit through plugin cleanup (this document's contract) or ledger game-world entities.
+11. Prove transmit-table thread serialization or publish immutable snapshots to CheckTransmit.
+12. Refuse full Metamod unload when `RemoveListenerEntity` / a live detour cannot be removed.
 
 ## Plugin runtime pin
 

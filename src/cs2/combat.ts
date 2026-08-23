@@ -91,9 +91,15 @@ export function invalidatePawnCache(): void {
 
 function resolveSlot(entityIndex: number): number {
   const hit = pawnToSlot.get(entityIndex);
-  if (hit !== undefined) return hit;
-  // Cache misses too (-1): most damage inflictors are grenades and world geometry, and re-scanning
-  // every connected player for each of those would make the hook O(players) per hit.
+  if (hit !== undefined) {
+    // A cached miss stays until spawn/death/round invalidation — most inflictors are world geometry.
+    // A cached hit must still be that slot's live pawn; a recycled pawn index is a different player.
+    if (hit < 0) return hit;
+    const p = Player.fromSlot(hit);
+    const pawn = p === null ? null : p.pawn;
+    if (pawn !== null && pawn.ref.index === entityIndex) return hit;
+    pawnToSlot.delete(entityIndex);
+  }
   const slot = slotOfPawn(entityIndex);
   pawnToSlot.set(entityIndex, slot);
   return slot;

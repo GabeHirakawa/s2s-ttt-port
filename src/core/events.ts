@@ -13,10 +13,18 @@ import type { GameState, RoleId } from "./enums";
 import type { Body } from "../cs2/bodies";
 import type { Cancelable } from "./bus";
 
-/** A round moved to `state`. Canceling vetoes the transition (the C# `GameStateUpdateEvent`). */
+/**
+ * A round is about to move to `state`. Canceling vetoes the transition (the C# `GameStateUpdateEvent`).
+ * Validators only — no world mutation. Side effects belong on {@link GameStateChangedEvent}.
+ */
 export interface GameStateEvent extends Cancelable {
   state: GameState;
   canceled: boolean;
+}
+
+/** The round has committed `state`. Observers may mutate the world; they cannot veto. */
+export interface GameStateChangedEvent {
+  state: GameState;
 }
 
 /** A player is about to be given `role`; a handler may rewrite or cancel it (karma timeout → Spectator). */
@@ -111,7 +119,10 @@ export interface SpecialRoundEvent {
 
 /** The complete event map this plugin's bus is typed over. */
 export interface TttEvents {
-  gameState: GameStateEvent;
+  /** Validate/veto only. No world mutation. */
+  gameStateChanging: GameStateEvent;
+  /** After `game.state` is written. Side effects (icons, specials, shop, karma). */
+  gameState: GameStateChangedEvent;
   /** Validate/rewrite only. No world mutation. */
   roleAssigning: RoleAssigningEvent;
   /** After `setRole`. Side effects (icons, credits, map context). */

@@ -24,6 +24,7 @@ import { msg } from "../core/msgs";
 import * as reg from "../core/registry";
 import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
+import { applyStateTransition } from "../core/state-commit";
 import { assignRoles, revealTraitorBuddies, roleName, stripRoundWeapons } from "./roles";
 import { clearLog, printLogs } from "./logger";
 import { clearBodies } from "../cs2/bodies";
@@ -96,14 +97,15 @@ export function roundEpoch(): number {
 }
 
 /**
- * Move to `next`, giving listeners a chance to veto. Returns false if a listener canceled.
- * Mirrors the C# `State` setter, which dispatched `GameStateUpdateEvent` on every write.
+ * Move to `next`, giving validators a chance to veto, then commit and notify observers.
+ *
+ * `gameStateChanging` is veto-only. `game.state` is written next, then `gameState` fires so
+ * MONITOR means after commit (icons, specials, shop, karma). A silent write
+ * ({@link abandonRound}, {@link returnToWaiting}) still skips both events — teardown already
+ * cleans up, and emitting here would churn entities on unload.
  */
 export function setState(next: GameState): boolean {
-  const ev = bus.emit("gameState", { state: next, canceled: false });
-  if (ev.canceled) return false;
-  game.state = next;
-  return true;
+  return applyStateTransition(bus, game, next);
 }
 
 /** Is a round currently being played? */
