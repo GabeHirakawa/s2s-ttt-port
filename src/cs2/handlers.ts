@@ -26,7 +26,9 @@ import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setArmor, setPawnIsAlive, setTakesDamage, tell, tellAll, toSpectator } from "./pawn";
 import { type HeldWeapon } from "./inventory";
-import { enforceRoundTeam, revealAsInnocent, setBenched } from "../game/teams";
+import { nextPreFrame } from "../core/preframe";
+import { AcquireMethod, AcquireResult, type CanAcquireView } from "./acquire";
+import { enforceRoundTeam, parseJoinTeam, revealAsInnocent, setBenched, wouldRefuseTeam } from "../game/teams";
 import { colorBody } from "./color";
 import { unspoofAlive } from "./spoof";
 import { game, inProgress, inWarmup } from "../game/game";
@@ -65,6 +67,22 @@ const BUY_ALIASES: Readonly<Record<string, string>> = {
   weapon_awp: "silentawp",
   weapon_hegrenade: "clustergrenade",
   weapon_healthshot: "healthshot",
+};
+
+/** CS2 item-definition indexes for {@link BUY_ALIASES}, used by `onCanAcquire`. */
+const BUY_BY_DEF: Readonly<Record<number, string>> = {
+  1: "deagle",
+  9: "silentawp",
+  23: "m4a1",
+  31: "taser",
+  39: "m4a1",
+  44: "clustergrenade",
+  45: "poisonsmoke",
+  50: "armor",
+  51: "armor",
+  57: "healthshot",
+  60: "m4a1",
+  61: "m4a1",
 };
 
 /** Whether this map's buy zones have already been removed — the `MapZoneRemover` latch. */
@@ -592,7 +610,8 @@ export function benchLateJoiner(slot: number): void {
  * `TeamChangeHandler`.
  *
  * The C# hooked the `jointeam` client command and refused it outright while a round was running.
- * s2script has no client-command hook, so this reacts to the resulting `player_team` event instead:
+ * `onJoinTeamCommand` is that refusal. This post-event path is the fallback undo if the command
+ * still lands:
  * a player who ends up on a playing team mid-round without having been dealt a role is put straight
  * back to spectator, and a player who already holds one is put back on the team their role entitles
  * them to. Same outcome, one event later.
@@ -600,6 +619,47 @@ export function benchLateJoiner(slot: number): void {
  * A player whose corpse has already been identified is exempt: they are publicly dead, so letting
  * them move to spectator (or be moved) reveals nothing. That exemption lives in `enforceRoundTeam`.
  */
+/**
+ * Refuse `jointeam` before the engine mutates the pawn. Fallback undo stays on `player_team`.
+ */
+export function onJoinTeamCommand(slot: number, argString: string): HookResultValue | void {
+  const team = parseJoinTeam(argString);
+  if (wouldRefuseTeam(slot, team)) return HookResult.Handled;
+  if (
+    inProgress() &&
+    (team === Team.Terrorist || team === Team.CounterTerrorist) &&
+    reg.roleOf(slot) === RoleId.None
+  ) {
+    benchLateJoiner(slot);
+    return HookResult.Handled;
+  }
+}
+
+/**
+ * Deny engine buy-menu grants during a live round. Shop aliases are re-routed through
+ * {@link tryPurchase} on the next PRE tick so `giveNamedItem` is not nested inside CanAcquire
+ * (s2script currently drops nested acquire votes). `item_purchase` remains the fallback strip
+ * if this hook is missing or the host still grants.
+ */
+export function onCanAcquire(view: CanAcquireView): HookResultValue | void {
+  if (view.method !== AcquireMethod.Buy) return;
+  if (!inProgress()) return;
+  const slot = view.player?.slot ?? -1;
+  const itemId = BUY_BY_DEF[view.defIndex];
+  view.result = AcquireResult.InvalidItem;
+  if (itemId !== undefined && slot >= 0) {
+    const item = itemById(itemId);
+    if (item !== undefined) {
+      nextPreFrame(() => {
+        if (!inProgress() || !reg.isAlive(slot)) return;
+        if (tryPurchase(slot, item) !== PurchaseResult.Success) return;
+        tell(slot, msgFor(slot, "SHOP_PURCHASED", msgFor(slot, item.nameKey)));
+      }, { slot });
+    }
+  }
+  return HookResult.Handled;
+}
+
 export function onTeamChange(slot: number, newTeam: Team, disconnecting = false): void {
   if (!inProgress()) return;
   if (slot < 0 || !reg.isConnected(slot)) return;

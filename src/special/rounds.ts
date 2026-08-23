@@ -257,6 +257,16 @@ function clearAll(): void {
   activeRounds.length = 0;
 }
 
+/**
+ * Restore every running special-round cvar (lowgrav, bhop, suppressed pistols).
+ *
+ * Unload and map change must call this: a hot reload mid-LowGrav used to leave `sv_gravity` scaled
+ * because only the Finished listener ran `clearAll`.
+ */
+export function clearSpecialRounds(): void {
+  clearAll();
+}
+
 /** Every round id the picker knows about — used by the admin command. */
 export function roundIds(): string[] {
   return ROUNDS.map((r) => r.id);

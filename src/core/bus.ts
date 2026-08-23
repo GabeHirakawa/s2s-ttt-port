@@ -78,12 +78,18 @@ export class EventBus<M extends object> {
     const list = this.lists[key] as unknown as Entry<M[K]>[] | undefined;
     if (list === undefined) return ev;
 
-    // Read the cancelable flag through a local so the common (non-cancelable) path never touches it.
+    // Snapshot so a subscribe during emit cannot mutate the walk, and so a throwing handler cannot
+    // abort later observers after an earlier one already changed teams, entities, or balances.
+    const snapshot = list.slice();
     const cancelable = "canceled" in (ev as object);
-    for (let i = 0; i < list.length; i++) {
-      const e = list[i]!;
+    for (let i = 0; i < snapshot.length; i++) {
+      const e = snapshot[i]!;
       if (cancelable && e.ignoreCanceled && (ev as unknown as Cancelable).canceled) continue;
-      e.fn(ev);
+      try {
+        e.fn(ev);
+      } catch (err) {
+        console.log(`[ttt] WARN: bus handler for ${key} threw: ${String(err)}`);
+      }
     }
     return ev;
   }

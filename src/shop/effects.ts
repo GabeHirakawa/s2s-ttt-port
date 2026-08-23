@@ -17,6 +17,7 @@
  */
 
 import { createEntity, type EntityRef } from "@s2script/sdk/entity";
+import { Transmit } from "@s2script/sdk/transmit";
 import { Vector } from "@s2script/sdk/math";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
@@ -314,7 +315,7 @@ export function grantTaser(slot: number): void {
   // taser in hand AND one on the floor.
   nextPreFrame(() => {
     give(slot, cls);
-  });
+  }, { slot });
 }
 /** Grant Stickers. */
 export function grantStickers(slot: number): void { hasStickers[slot] = 1; }
@@ -1277,6 +1278,21 @@ export function tickEffects(dt: number): void {
   tickCompass(dt);
 }
 
+function hideRef(ent: EntityRef | null | undefined): void {
+  if (ent !== null && ent !== undefined && ent.isValid()) Transmit.setVisibleTo(ent, []);
+}
+
+/** Re-hide every Traitor-only tripwire twin. Call before teardown `Kill`. */
+export function hideEffects(): void {
+  for (let i = 0; i < tripwires.length; i++) {
+    const tw = tripwires[i]!;
+    hideRef(tw.glowA);
+    hideRef(tw.glowB);
+    hideRef(tw.propA);
+    hideRef(tw.propB);
+  }
+}
+
 /** Clear every per-round item flag and remove placed objects. */
 export function resetEffects(): void {
   hasStickers.fill(0);
@@ -1293,6 +1309,7 @@ export function resetEffects(): void {
   poisonFromSmoke.fill(0);
   activeC4 = 0;
 
+  hideEffects();
   for (let i = 0; i < stations.length; i++) stations[i]!.ref?.acceptInput("Kill");
   stations.length = 0;
   for (let i = 0; i < tripwires.length; i++) {

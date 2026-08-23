@@ -15,7 +15,7 @@
  */
 
 import { delay } from "@s2script/sdk/timers";
-import { nextPreFrame } from "../core/preframe";
+import { bindRoundEpoch, nextPreFrame } from "../core/preframe";
 import { Server } from "@s2script/sdk/server";
 import { GameRules, RoundEndReason, Teams } from "@s2script/cs2";
 import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
@@ -87,6 +87,12 @@ function setEngineRespawnAllowed(on: boolean): void {
 /** Wire the module to the plugin's bus. Call once from the factory. */
 export function initGame(eventBus: EventBus<TttEvents>): void {
   bus = eventBus;
+  bindRoundEpoch(roundEpoch);
+}
+
+/** Current round-timer generation. Pre-frame jobs and delay hops stamp this. */
+export function roundEpoch(): number {
+  return epoch;
 }
 
 /**
@@ -190,8 +196,11 @@ export function startGame(quiet = false): void {
   }
 
   void delay(cfg.countdownSeconds * 1000).then(() => {
-    if (mine !== epoch || game.state !== GameState.Countdown) return;
-    beginRound();
+    // Timer wakes in POST; world mutation waits for the next PRE.
+    nextPreFrame(() => {
+      if (mine !== epoch || game.state !== GameState.Countdown) return;
+      beginRound();
+    });
   });
 }
 
@@ -292,8 +301,10 @@ export function setRoundDeadline(seconds: number): void {
   GameRules.get()?.setTimeRemaining(Math.ceil(seconds));
   const mine = ++epoch;
   void delay(seconds * 1000).then(() => {
-    if (mine !== epoch || game.state !== GameState.InProgress) return;
-    endGame(RoleId.Innocent, "Round ended due to timeout");
+    nextPreFrame(() => {
+      if (mine !== epoch || game.state !== GameState.InProgress) return;
+      endGame(RoleId.Innocent, "Round ended due to timeout");
+    });
   });
 }
 
@@ -447,13 +458,15 @@ export function endGame(winner: RoleId, reason?: string): void {
 
   const mine = ++epoch;
   void delay(cfg.timeBetweenRounds * 1000).then(() => {
-    if (mine !== epoch) return;
-    // When the ENGINE ended this round its own restart is already pending (mp_round_restart_delay),
-    // so terminating again here would cut the restarting round short a second or two in.
-    if (engineDriven) return;
-    Server.command("mp_ignore_round_win_conditions 1");
-    GameRules.terminateRound(endReason, 3);
-    Server.command("mp_ignore_round_win_conditions 0");
+    nextPreFrame(() => {
+      if (mine !== epoch) return;
+      // When the ENGINE ended this round its own restart is already pending (mp_round_restart_delay),
+      // so terminating again here would cut the restarting round short a second or two in.
+      if (engineDriven) return;
+      Server.command("mp_ignore_round_win_conditions 1");
+      GameRules.terminateRound(endReason, 3);
+      Server.command("mp_ignore_round_win_conditions 0");
+    });
   });
 
   // Watchdog on FINISHED. Nothing inside TTT drives the round forward from here: the next round is
@@ -463,10 +476,12 @@ export function endGame(winner: RoleId, reason?: string): void {
   // running its own round logic — the mode deadlocks with everyone stood in the end-of-round
   // reveal forever. Fall back to WAITING and let the idle poller take it from there.
   void delay((cfg.timeBetweenRounds + FINISHED_TIMEOUT) * 1000).then(() => {
-    // Any legitimate restart moves the state on (and `startGame` bumps `epoch`), so a live token
-    // AND a still-FINISHED state together mean the restart really is never coming.
-    if (mine !== epoch || game.state !== GameState.Finished) return;
-    returnToWaiting();
+    nextPreFrame(() => {
+      // Any legitimate restart moves the state on (and `startGame` bumps `epoch`), so a live token
+      // AND a still-FINISHED state together mean the restart really is never coming.
+      if (mine !== epoch || game.state !== GameState.Finished) return;
+      returnToWaiting();
+    });
   });
 }
 
@@ -599,6 +614,23 @@ export function tickWaiting(dt: number): void {
   if (waitingAccum < 2) return;
   waitingAccum = 0;
   startGame(true);
+}
+
+/**
+ * Abandon the live round without touching pawns, teams, or loadouts.
+ *
+ * Hot reload must not `switchTeam` / respawn / strip: that is extra index churn in the same window
+ * as icon/DNA teardown. The replacement instance starts `Waiting` and does not spawn role entities
+ * until the next deal, after at least one simulation has processed the queued `Kill`s.
+ */
+export function abandonRound(): void {
+  epoch++;
+  engineEndedRound = false;
+  game.state = GameState.Waiting;
+  game.winner = RoleId.None;
+  waitingAccum = 0;
+  countdownAccum = 0;
+  setSpoofingEnabled(false);
 }
 
 /** A map changed under us: abandon any live round. */

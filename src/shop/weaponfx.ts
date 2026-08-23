@@ -392,20 +392,31 @@ function packGlow(r: number, g: number, b: number): number {
 /** Tear down `slot`'s marker. CHILD FIRST: the model is merged onto the relay, so the relay is its
  *  parent, and destroying a parent while clients still hold the child is what produces
  *  `CopyExistingEntity: missing client entity`. */
+function hideRef(ent: EntityRef | null): void {
+  if (ent !== null && ent.isValid()) Transmit.setVisibleTo(ent, []);
+}
+
 function clearDnaGlow(slot: number): void {
   const model = dnaGlowModel[slot];
   if (model !== null) {
-    // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
-    // broadcasts a dying hidden entity to every client for one snapshot.
+    // Hide first — resetting transmit then Kill broadcasts a dying hidden entity.
+    hideRef(model);
     model.acceptInput("Kill");
     dnaGlowModel[slot] = null;
   }
   const relay = dnaGlowRelay[slot];
   if (relay !== null) {
-    // Removed while still filtered — see the note in icons.ts `removeIcons`: resetting first
-    // broadcasts a dying hidden entity to every client for one snapshot.
+    hideRef(relay);
     relay.acceptInput("Kill");
     dnaGlowRelay[slot] = null;
+  }
+}
+
+/** Re-hide every DNA marker. Call before teardown `Kill` on a hot reload. */
+export function hideWeaponFx(): void {
+  for (let slot = 0; slot < MAX_SLOTS; slot++) {
+    hideRef(dnaGlowModel[slot]);
+    hideRef(dnaGlowRelay[slot]);
   }
 }
 

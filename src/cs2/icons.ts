@@ -498,6 +498,9 @@ function destroyIcons(slot: number): void {
   for (let i = PARTS - 1; i >= 0; i--) {
     const ent = icons[base + i];
     if (ent === null) continue;
+    // Re-hide before Kill: host unload may already have swept transmit, and a public dying
+    // Traitor glow is the hot-reload CopyExistingEntity window.
+    if (ent.isValid()) Transmit.setVisibleTo(ent, []);
     console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE free icon slot=${String(slot)} part=${String(i)} index=${String(ent.index)}`);
     // "Kill" INPUT, never a direct remove.
     //
@@ -599,7 +602,7 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
   const ready = pawn !== null && pawn.isValid && (!wantsIcon || pawn.origin !== null);
   if (!ready) {
     if (retries > 0) {
-      nextPreFrame(() => applyRoleVisuals(slot, role, retries - 1));
+      nextPreFrame(() => applyRoleVisuals(slot, role, retries - 1), { slot });
       return;
     }
     console.log(`[ttt] WARN: pawn never left staging slot=${slot} role=${role}`);
@@ -621,7 +624,9 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
       const secs = cfg.roleGlowSeconds;
       if (secs > 0) {
         after(secs * 1000, () => {
-          if (reg.roleOf(slot) === role) parkGlow(slot);
+          nextPreFrame(() => {
+            if (reg.roleOf(slot) === role) parkGlow(slot);
+          }, { slot });
         });
       }
     } else {
@@ -638,7 +643,7 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
     if (later === null || !later.isValid || reg.roleOf(slot) !== role) return;
     const applied = roleModel(role);
     if (later.ref.setModel(applied)) noteAppliedModel(slot, applied);
-  });
+  }, { slot });
 }
 
 /**
@@ -808,16 +813,28 @@ function clearAllIcons(): void {
 }
 
 /**
+ * Re-hide every marker this module owns. Does not destroy and does not drop name tags.
+ *
+ * Call before any teardown `Kill`: a previously filtered entity that becomes visible for one
+ * snapshot, then dies, is the hot-reload client fatal.
+ */
+export function hideIcons(): void {
+  for (let slot = 0; slot < MAX_SLOTS; slot++) parkIcons(slot);
+}
+
+/**
  * Drop everything this module owns — map change and unload.
  *
- * `Transmit.resetAll` is safe to call from here because role icons are the only thing in this
- * plugin that installs a transmit rule.
+ * Do NOT call `Transmit.resetAll` here. DNA glows and tripwire twins also install transmit rules,
+ * and resetting beside `Kill` broadcasts a dying hidden entity. Leave hide rules on the dying
+ * serials; the host should sweep transmit after `onUnload`.
  *
  * Call this BEFORE `reg.seedFromEngine()` on map start: the names have to be back on the engine
  * before anything re-reads them. (`setRoleTag`'s strip makes the wrong order survivable rather than
  * corrupting, but only this order leaves the player's own name on their scoreboard entry.)
  */
 export function resetIcons(): void {
+  hideIcons();
   clearAllIcons();
   // Put every tagged name back BEFORE the bookkeeping that knows what the real name was is dropped
   // — otherwise the round-end reveal's "[T] " outlives the module and becomes the player's name.
@@ -827,15 +844,13 @@ export function resetIcons(): void {
   stickers.fill(0);
   tagged.fill(0);
   realNames.fill("");
-  Transmit.resetAll();
 }
 
 /** Register the icon, uniform and role-tag listeners. */
 export function installIcons(bus: EventBus<TttEvents>): void {
   bus.on(
-    "roleAssign",
+    "roleAssigned",
     (ev) => {
-      if (ev.canceled) return;
       const slot = ev.slot;
       const role = ev.role;
 

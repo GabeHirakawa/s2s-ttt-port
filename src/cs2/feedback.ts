@@ -108,7 +108,8 @@ export function applyMapContext(slot: number, role: RoleId): string {
 /**
  * Apply the role context one frame after the deal, once the pawn has settled.
  *
- * THE PAWN IS NOT STABLE DURING THE DISPATCH. `roles.ts` fires `roleAssign` and only then calls
+ * THE PAWN IS NOT STABLE DURING THE DISPATCH. `roles.ts` commits the role, switches team, then fires
+ * `roleAssigned` which calls
  * `applyRoleTeam` -> `switchTeam`, and the engine MAY respawn the pawn inside that call (the hazard
  * already documented at `roles.ts:148` and `icons.ts:550`). Our `acceptInput` queues through
  * `AddEntityIOEvent` rather than running synchronously, so a context applied during the dispatch is
@@ -135,15 +136,15 @@ function scheduleMapContext(slot: number, role: RoleId, retries: number): void {
       return;
     }
     applyMapContext(slot, role);
-  });
+  }, { slot });
 }
 
 /** Register the feedback + map-integration listeners. */
 export function installFeedback(bus: EventBus<TttEvents>): void {
   bus.on(
-    "roleAssign",
+    "roleAssigned",
     (ev) => {
-      if (ev.canceled || ev.role === RoleId.Spectator) return;
+      if (ev.role === RoleId.Spectator) return;
       flashRoleColor(ev.slot, ev.role);
       scheduleMapContext(ev.slot, ev.role, 1);
     },

@@ -646,7 +646,7 @@ export function registerCommands(commands: CtxCommands): void {
     );
   });
 
-  // ROOT, not GENERIC: this writes the registry DIRECTLY and never emits `roleAssign`, so it hands
+  // ROOT, not GENERIC: this writes the registry DIRECTLY and never emits `roleAssigned`, so it hands
   // out a role that exists only in the bookkeeping — no map context, no icon or glow, no uniform, no
   // loadout, no team switch. That is useful for exercising karma and the win checks, and actively
   // misleading for anything else, which is not a footgun to leave on a generic admin flag. Use

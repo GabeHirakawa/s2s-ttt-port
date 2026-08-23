@@ -113,8 +113,8 @@ export function applyRoleTeam(slot: number, role: RoleId): boolean {
  * `TeamChangeHandler.onJoinTeam`'s refusal. Returns true if a move was undone.
  *
  * The C# hooked the `jointeam` client command and returned `Handled` for anyone in a live round, so
- * the change never happened at all. s2script has no client-command hook, so this reacts to the
- * resulting `player_team` instead and undoes the move. The right subscription for that is a PRE-hook
+ * the change never happened at all. Current s2script exposes `onClientCommand("jointeam")`; refuse
+ * there first. `player_team` remains the fallback undo if the command still lands. The right subscription for that is a PRE-hook
  * returning `HookResult.Handled` on a true return from here: the server still processes the
  * change (which is why it still has to be undone), but the "X has joined the Spectators" broadcast
  * that IS the leak never reaches a client. Called from a post-event handler it still converges on
@@ -155,6 +155,15 @@ export function applyRoleTeam(slot: number, role: RoleId): boolean {
  *
  * The undo stays in the post-event path, so the switch is issued exactly once.
  */
+/** Parse a `jointeam` argument string into a {@link Team}. Unknown input is {@link Team.None}. */
+export function parseJoinTeam(argString: string): Team {
+  const parts = argString.trim().split(/\s+/);
+  const raw = parts[parts.length - 1] ?? "";
+  const n = parseInt(raw, 10);
+  if (n === Team.Spectator || n === Team.Terrorist || n === Team.CounterTerrorist) return n;
+  return Team.None;
+}
+
 export function wouldRefuseTeam(slot: number, newTeam: Team, disconnecting = false): boolean {
   // `TeamChangeHandler.onJoinTeam`'s own first test: `if (games.ActiveGame is not { State:
   // IN_PROGRESS }) return HookResult.Continue;`. Without it this drags players back onto T during

@@ -286,7 +286,7 @@ export function replaceInSlot(
   clearSlot(slot, gearSlot);
   nextPreFrame(() => {
     give(slot, className, clip, reserve);
-  });
+  }, { slot });
 }
 
 /**
@@ -315,7 +315,7 @@ export function giveReplacing(slot: number, classNames: readonly string[]): void
   }
   nextPreFrame(() => {
     for (let i = 0; i < classNames.length; i++) give(slot, classNames[i]!);
-  });
+  }, { slot });
 }
 
 /** Strip every held weapon. */
