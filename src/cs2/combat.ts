@@ -450,7 +450,7 @@ export function killWithGadget(
   // "handled, but nobody to credit", which must still be distinguishable from "not a gadget kill".
   gadgetHandledKiller[victim] = killer >= 0 ? killer : -2;
   const dying = victim;
-  nextPreFrame(() => { pawnOf(dying)?.slay(); });
+  nextPreFrame(() => { pawnOf(dying)?.slay(); }, { slot: dying });
 }
 
 /**
@@ -764,7 +764,7 @@ function handleDeath(
         // it never isolated which one.
         if (cfg.bodySettle) settleBody(corpse);
         if (cfg.bodyHidePawn) setPawnAlpha(victimSlot, 0);
-      });
+      }, { slot: victimSlot });
       // Exactly ONE pass, matching the C#'s single `NextWorldUpdate(correctRagdoll)`. Extra passes
       // at +250ms/+700ms were tried and make the corpse convulse: by then the ragdoll is simulating,
       // so each re-teleport yanks a settling body back to its spawn point and physics fights back.

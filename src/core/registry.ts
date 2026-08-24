@@ -26,6 +26,8 @@ const connected = new Uint8Array(MAX_SLOTS);
 const participating = new Uint8Array(MAX_SLOTS);
 /** Per-slot SteamID64 as a decimal string; "" when the slot is free. Cached at connect. */
 const steamIds: string[] = new Array<string>(MAX_SLOTS).fill("");
+/** Bumped on every connect/disconnect so a recycled slot cannot inherit queued work. */
+const generations = new Uint32Array(MAX_SLOTS);
 /** Per-slot display name, refreshed on connect and at round init. */
 const names: string[] = new Array<string>(MAX_SLOTS).fill("");
 
@@ -56,6 +58,7 @@ export function addPlayer(slot: number, steamId: string, name: string): void {
   steamIds[slot] = steamId;
   names[slot] = name;
   if (connected[slot] === 1) return;
+  generations[slot]!++;
   connected[slot] = 1;
   // Keep `active` sorted with a single insertion — cheaper than a re-sort and keeps iteration
   // order stable (deterministic role assignment for a given RNG sequence).
@@ -68,6 +71,7 @@ export function addPlayer(slot: number, steamId: string, name: string): void {
 export function removePlayer(slot: number): void {
   if (slot < 0 || slot >= MAX_SLOTS || connected[slot] === 0) return;
   connected[slot] = 0;
+  generations[slot]!++;
   setAlive(slot, false);
   roles[slot] = RoleId.None;
   participating[slot] = 0;
@@ -144,6 +148,11 @@ export function isParticipating(slot: number): boolean {
 /** Cached SteamID64 for a slot ("" if free / bot). */
 export function steamIdOf(slot: number): string {
   return slot >= 0 && slot < MAX_SLOTS ? steamIds[slot]! : "";
+}
+
+/** Connection generation for `slot`. Changes on every connect and disconnect. */
+export function generationOf(slot: number): number {
+  return slot >= 0 && slot < MAX_SLOTS ? generations[slot]! : 0;
 }
 
 /** Cached display name for a slot. */

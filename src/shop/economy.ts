@@ -162,8 +162,8 @@ export function tickEconomy(dt: number): void {
 /** Register every income/expenditure listener. */
 export function installEconomy(bus: EventBus<TttEvents>): void {
   // Starting credits, scaled by karma.
-  bus.on("roleAssign", (ev) => {
-    if (ev.canceled || ev.role === RoleId.Spectator) return;
+  bus.on("roleAssigned", (ev) => {
+    if (ev.role === RoleId.Spectator) return;
     const base = cfg.roleCredits[ev.role] ?? 0;
     if (base === 0) return;
     const percent = (karmaOf(ev.slot) + cfg.karmaMin) / MAX_KARMA;

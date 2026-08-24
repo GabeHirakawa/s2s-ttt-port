@@ -38,7 +38,8 @@
 
 import { plugin } from "@s2script/sdk/plugin";
 import { Server } from "@s2script/sdk/server";
-import { clearPreFrame, drainPreFrame } from "./core/preframe";
+import { bindPreFrameIdentity, drainPreFrame } from "./core/preframe";
+import { teardownWorld } from "./core/teardown";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { GameState, RoleId, Team } from "./core/enums";
 import { EventBus, Priority } from "./core/bus";
@@ -49,25 +50,26 @@ import { installPhrases, msg, precompileAll } from "./core/msgs";
 import * as reg from "./core/registry";
 
 import {
-  checkEndConditions, game, initGame, inWarmup, onEngineRoundEnd, onEngineRoundStart, onMapChange,
+  checkEndConditions, game, initGame, inWarmup, onEngineRoundEnd, onEngineRoundStart,
   reconcileRound, startGame, syncRosterAndAnnounce, tickCountdown, tickWaiting,
 } from "./game/game";
 import { logPurchase, logRoleAssigned } from "./game/logger";
-import { clearReservedRoles, roleName } from "./game/roles";
+import { roleName } from "./game/roles";
 
 import {
   installDeathFeedSuppressor, installMatchStats, invalidatePawnCache, onDamage, onDeathPre,
   onPlayerHurt, onSpawn, setDeathBus,
 } from "./cs2/combat";
-import { clearBodies, precacheBodyModels } from "./cs2/bodies";
-import { initInteract, inspectIdentify, resetInteract, tickInteract } from "./cs2/interact";
-import { reassertSpoof, resetSpoof, tickSpoof } from "./cs2/spoof";
+import { precacheBodyModels } from "./cs2/bodies";
+import { initInteract, inspectIdentify, tickInteract } from "./cs2/interact";
+import { reassertSpoof, tickSpoof } from "./cs2/spoof";
 import { installFeedback } from "./cs2/feedback";
-import { clearBenched, wouldRefuseTeam } from "./game/teams";
-import { installIcons, precacheRoleModels, resetIcons } from "./cs2/icons";
+import { wouldRefuseTeam } from "./game/teams";
+import { installIcons, precacheRoleModels } from "./cs2/icons";
 import {
-  benchLateJoiner, handleChat, installBombSuppressor, installHandlers, onItemPurchase, onTeamChange,
-  removeBuyZones, resetBuyZones, setSelfSpectateHandler, tickHandlers, unmuteAll,
+  benchLateJoiner, handleChat, installBombSuppressor, installHandlers, onCanAcquire, onItemPurchase,
+  onJoinTeamCommand, onTeamChange, removeBuyZones, resetBuyZones, setSelfSpectateHandler,
+  tickHandlers,
 } from "./cs2/handlers";
 
 import { installKarma } from "./karma/karma";
@@ -78,17 +80,16 @@ import {
   onBulletImpact,
   precacheEffectModels,
   releaseC4,
-  resetEffects,
   tickEffects,
 } from "./shop/effects";
 import { installEconomy, tickEconomy } from "./shop/economy";
 import { installSpecialRounds, tickSpecialRounds } from "./special/rounds";
 import {
-  installWeaponFx, onHeDetonate, onSmokeDetonate, onSmokeExpired, onWeaponFire, resetWeaponFx,
+  installWeaponFx, onHeDetonate, onSmokeDetonate, onSmokeExpired, onWeaponFire,
   tickWeaponFx, tickDnaTracker,
 } from "./shop/weaponfx";
 
-import { resetHud, tickHud } from "./cs2/hud";
+import { tickHud } from "./cs2/hud";
 import { onPlayerPing, registerCommands, resetShopMenus } from "./commands";
 
 /**
@@ -203,6 +204,7 @@ export default plugin((ctx) => {
 
   // ── subsystem wiring ──────────────────────────────────────────────────────
   initGame(bus);
+  bindPreFrameIdentity((slot) => ({ steamId: reg.steamIdOf(slot), gen: reg.generationOf(slot) }));
   initShop(bus);
   initInteract(bus);
 
@@ -234,9 +236,9 @@ export default plugin((ctx) => {
   // Log lines the round logger owns but that other subsystems' events produce. MONITOR priority so
   // the entry records the role karma may have rewritten, not the one originally dealt.
   bus.on(
-    "roleAssign",
+    "roleAssigned",
     (ev) => {
-      if (!ev.canceled) logRoleAssigned(ev.slot, ev.role, roleName(ev.role));
+      logRoleAssigned(ev.slot, ev.role, roleName(ev.role));
     },
     { priority: Priority.MONITOR },
   );
@@ -406,6 +408,14 @@ export default plugin((ctx) => {
     return onItemPurchase(slot, ev.getString("weapon")) ? HookResult.Handled : undefined;
   });
 
+  // Prefer refusing the grant at CanAcquire. Nested vote folding is still broken on some hosts,
+  // so `item_purchase` above remains the strip fallback.
+  if (ctx.items?.onCanAcquire !== undefined) {
+    ctx.items.onCanAcquire(onCanAcquire);
+  } else {
+    console.log("[ttt] WARN: ctx.items.onCanAcquire unavailable — buy-menu strip stays on item_purchase");
+  }
+
   // A weapon inspect identifies a corpse too, alongside USE — the C# routes both buttons into the
   // one `onStartUse` trace (`PropMover.cs:53`). Driven off the event rather than the button bit
   // because `PlayerButtons.Inspect` is `1 << 35` and will not survive a JS bitwise test; see
@@ -425,24 +435,13 @@ export default plugin((ctx) => {
   });
 
   ctx.server.onMapStart(() => {
-    onMapChange();
-    // BEFORE `seedFromEngine`: role name tags are written at the Finished transition and are still
-    // on the engine names here, and `resetIcons` is what puts the originals back. Seeding first
-    // would cache "[T] Bob" as Bob's real name and add a bracket on every map change.
-    resetIcons();
-    // Drop anything queued for a pre-frame that will never come — see core/preframe.ts.
-    clearPreFrame();
-    clearReservedRoles();
+    // Hide-then-Kill-then-restore, including name tags. Must run BEFORE `seedFromEngine` or
+    // "[T] Bob" is cached as Bob's real name.
+    teardownWorld(bus, "map");
     reg.seedFromEngine();
     // Only clears the one-shot latch — the zones themselves are not spawned yet, so the removal
     // proper waits for `round_start`.
     resetBuyZones();
-    resetInteract();
-    resetEffects();
-    resetSpoof();
-    resetWeaponFx();
-    // A compass strip or a look-at name from last round must not stay pinned to anyone's screen.
-    resetHud();
     refresh();
     refreshItems();
     applyServerSettings();
@@ -515,28 +514,13 @@ export default plugin((ctx) => {
 
   // ── commands ──────────────────────────────────────────────────────────────
   registerCommands(ctx.commands);
+  ctx.commands.onClientCommand("jointeam", onJoinTeamCommand);
 
   console.log("[ttt] loaded — Trouble in Terrorist Town");
 
   return {
     onUnload() {
-      clearBodies(true);
-      resetEffects();
-      resetWeaponFx();
-      resetInteract();
-      resetSpoof();
-      resetHud();
-      resetShopMenus();
-      clearBenched();
-      // Drops the role icons and puts every tagged name back: an unload must not leave "[T] Bob".
-      resetIcons();
-    // Drop anything queued for a pre-frame that will never come — see core/preframe.ts.
-    clearPreFrame();
-    clearReservedRoles();
-      unmuteAll();
-      reg.resetRegistry();
-      bus.clear();
-      Server.command("mp_ignore_round_win_conditions 0");
+      teardownWorld(bus, "unload");
     },
   };
 });

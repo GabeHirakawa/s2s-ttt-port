@@ -19,11 +19,17 @@ export interface GameStateEvent extends Cancelable {
   canceled: boolean;
 }
 
-/** A player is about to be given `role`; a handler may rewrite it (karma timeout → Spectator). */
-export interface RoleAssignEvent extends Cancelable {
+/** A player is about to be given `role`; a handler may rewrite or cancel it (karma timeout → Spectator). */
+export interface RoleAssigningEvent extends Cancelable {
   slot: number;
   role: RoleId;
   canceled: boolean;
+}
+
+/** The role has been committed. Observers may mutate the world; they cannot veto. */
+export interface RoleAssignedEvent {
+  slot: number;
+  role: RoleId;
 }
 
 /** A player died. `killer` is -1 for a suicide/world death. */
@@ -106,7 +112,10 @@ export interface SpecialRoundEvent {
 /** The complete event map this plugin's bus is typed over. */
 export interface TttEvents {
   gameState: GameStateEvent;
-  roleAssign: RoleAssignEvent;
+  /** Validate/rewrite only. No world mutation. */
+  roleAssigning: RoleAssigningEvent;
+  /** After `setRole`. Side effects (icons, credits, map context). */
+  roleAssigned: RoleAssignedEvent;
   death: DeathEvent;
   damage: DamageEvent;
   join: JoinEvent;

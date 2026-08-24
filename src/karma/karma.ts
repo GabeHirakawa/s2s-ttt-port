@@ -59,7 +59,7 @@ const lastWarned = new Float64Array(MAX_SLOTS);
  * `Dictionary<IPlayer, DateTime> lastWarned`, and `IPlayer` equality is SteamID equality — so a
  * sit-out and the 24h warning window follow the *person*: they survive a reconnect and they never
  * land on whoever inherits the freed slot. The live tables above stay slot-indexed because
- * `roleAssign` reads them for every player of every round; these two Maps are touched only on
+ * `roleAssigning` reads them for every player of every round; these two Maps are touched only on
  * connect and disconnect.
  */
 const benchRounds = new Map<string, number>();
@@ -487,7 +487,7 @@ export function installKarma(eventBus: EventBus<TttEvents>): void {
 
   // Bench players who are serving a timeout: rewrite their role to Spectator as it is dealt.
   eventBus.on(
-    "roleAssign",
+    "roleAssigning",
     (ev) => {
       const remaining = timeoutRounds[ev.slot]!;
       if (remaining <= 0) return;

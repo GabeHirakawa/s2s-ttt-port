@@ -54,8 +54,9 @@ export function detectiveTarget(n: number): number {
 }
 
 /**
- * Deal roles to `pool` (slots), firing `roleAssign` for each so listeners (karma timeout) can veto
- * or rewrite the choice. Returns the number of players who ended up participating.
+ * Deal roles to `pool` (slots), firing `roleAssigning` then committing, then `roleAssigned`.
+ * Listeners on the first event (karma timeout) can veto or rewrite; observers on the second
+ * run only after `setRole`. Returns the number of players who ended up participating.
  *
  * Selection prefers players who did NOT hold the role last round, with a 1-in-6 chance of ignoring
  * that preference so a small server never starves — identical to the C# `RatioBasedRole` behaviour.
@@ -135,7 +136,7 @@ function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: num
       continue;
     }
 
-    const ev = bus.emit("roleAssign", { slot, role, canceled: false });
+    const ev = bus.emit("roleAssigning", { slot, role, canceled: false });
     if (ev.canceled) continue;
 
     reg.setRole(slot, ev.role);
@@ -150,12 +151,15 @@ function deal(bus: EventBus<TttEvents>, pool: number[], role: RoleId, count: num
     // written before it. `applyRoleTeam` now switches EVERY dealt player (C# parity — see the note
     // there on why the Detective-only short-circuit was the crash), so every player pays the extra
     // frame rather than just one. That is the point: uniform churn, no odd pawn out.
-    if (applyRoleTeam(slot, ev.role)) {
+    const moved = applyRoleTeam(slot, ev.role);
+    // Observers (icons, credits, map context) run AFTER the commit and team intent.
+    bus.emit("roleAssigned", { slot, role: ev.role });
+    if (moved) {
       const target = slot;
-      const role = ev.role;
+      const assigned = ev.role;
       nextPreFrame(() => {
-        if (reg.roleOf(target) === role) applyLoadout(target, role);
-      });
+        if (reg.roleOf(target) === assigned) applyLoadout(target, assigned);
+      }, { slot: target });
     } else {
       applyLoadout(slot, ev.role);
     }
@@ -172,7 +176,7 @@ function choose(pool: number[], role: RoleId): number {
   // A reservation outranks the weighting: an admin who asked for this role gets it.
   //
   // Done HERE rather than by assigning outside the deal loop, so a reserved player goes through the
-  // identical path — the roleAssign dispatch that drives icons, uniforms, glow and loadout, and the
+  // identical path — the roleAssigning/roleAssigned dispatch that drives icons, uniforms, glow and loadout, and the
   // quota accounting. Reserving Traitor therefore CONSUMES one of the round's Traitor slots rather
   // than adding one, which is what keeps the ratios honest.
   for (let i = 0; i < pool.length; i++) if (reserved[pool[i]!] === role) return i;
@@ -221,7 +225,7 @@ export function applyLoadout(slot: number, role: RoleId): void {
     // someone for a role they no longer hold.
     if (reg.roleOf(slot) !== role) return;
     for (let i = 0; i < weapons.length; i++) give(slot, weapons[i]!);
-  });
+  }, { slot });
 }
 
 /**
