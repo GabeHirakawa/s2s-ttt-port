@@ -1,8 +1,9 @@
 /**
- * CanAcquire view used when the published `@s2script/cs2` package has no `ctx.items`.
- * Values match the engine enums in s2script's CS2 items package.
+ * CanAcquire enums and the slot-only view this plugin reads.
  *
- * `player` is the slot-bearing subset this plugin reads. The host view is a full Player.
+ * `@s2script/cs2@0.13.0` still has no `ctx.items` types. The host on main does; values match
+ * that package's engine enums. `player` here is the slot-bearing subset — the host view is a
+ * full Player.
  */
 export const AcquireMethod = {
   PickUp: 0,

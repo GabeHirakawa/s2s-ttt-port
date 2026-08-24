@@ -512,16 +512,8 @@ export function installDeathFeedSuppressor(): void {
  * the session with no trace of why.
  */
 function setDeathViewers(viewers: readonly number[]): void {
-  const setter = (Events as unknown as { setRecipients?: (s: readonly number[]) => void }).setRecipients;
-  if (typeof setter !== "function") {
-    if (!warnedNoRecipients) {
-      warnedNoRecipients = true;
-      console.log("[ttt] Events.setRecipients unavailable — the kill feed cannot be scoped");
-    }
-    return;
-  }
   try {
-    setter.call(Events, viewers);
+    Events.setRecipients(viewers);
   } catch (err) {
     if (!warnedNoRecipients) {
       warnedNoRecipients = true;

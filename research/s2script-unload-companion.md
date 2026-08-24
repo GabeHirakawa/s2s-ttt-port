@@ -54,6 +54,7 @@ Recorded in `research/event-hook-timing-audit.md` if that document is present; o
 
 ## Plugin runtime pin
 
-TTT source typechecks against published `@s2script/sdk@0.11.0` plus
-`src/s2script-runtime.d.ts` (`s2s build` only loads top-level `src/*.d.ts`).
-Deploy the host at or after `a835e6c77d2b648392d53686f919738193dbe10b`.
+TTT typechecks against published `@s2script/sdk@0.21.0` / `@s2script/cs2@0.13.0`.
+`ctx.items.onCanAcquire` is still missing from those types; `src/s2script-items.d.ts`
+covers it (`s2s build` only loads top-level `src/*.d.ts`). Deploy the host at or after
+`a835e6c77d2b648392d53686f919738193dbe10b`.
