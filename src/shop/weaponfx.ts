@@ -17,7 +17,8 @@
 import { UserMessages, type UserMessageView } from "@s2script/sdk/usermessages";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { Server } from "@s2script/sdk/server";
-import { createEntity, type EntityRef } from "@s2script/sdk/entity";
+import { createEntity, Entity, type EntityRef } from "@s2script/sdk/entity";
+import { refOwnsIndex } from "../core/index-identity";
 import { Transmit } from "@s2script/sdk/transmit";
 import { after } from "@s2script/sdk/timers";
 import { Sound, type PrecacheContext } from "@s2script/sdk/sound";
@@ -57,10 +58,10 @@ const clusterCharge = new Uint8Array(MAX_SLOTS);
 /**
  * When each slot last got a DNA reading on a given body — throttles the message.
  *
- * Keyed on a packed `slot * 65536 + entityIndex` integer rather than the C#'s `player.Id + "." +
- * body.Id` string: this is on the USE-press path, and entity indices never reach 65536.
+ * Keyed on `slot:body.id` so a recycled ragdoll index cannot inherit or skip another corpse's
+ * scan window. The C# used `player.Id + "." + body.Id` for the same reason.
  */
-const lastDnaRead = new Map<number, number>();
+const lastDnaRead = new Map<string, number>();
 
 /** Flavour text for a body with no recoverable DNA, as the C# `missingDnaExplanations`. */
 const NO_DNA: readonly string[] = [
@@ -225,17 +226,26 @@ interface Cloud {
   life: number;
   /** Entity index of the smoke projectile, or -1 if the caller did not supply one. */
   entity: number;
+  /**
+   * Live ref for {@link entity}, or null when `findByClass` could not bind one. A recycled
+   * projectile index is detected by `refOwnsIndex` failing — the id alone is not an identity.
+   */
+  ref: EntityRef | null;
 }
 
 /**
- * How long a cloud keeps poisoning, in seconds.
+ * How long a cloud keeps poisoning, in seconds, when we could not bind a projectile ref.
  *
- * The C# ticked for as long as `effect.Projectile.IsValid`. There is no entity-by-index lookup in
- * the SDK (`Entity` exposes only `findByClass`, which allocates and cannot tell two smokes apart),
- * so the cloud runs on the smoke's own ~18s lifetime instead, cut short by `smokegrenade_expired`
- * when that event is wired through.
+ * The C# ticked for as long as `effect.Projectile.IsValid`. At detonate we resolve the projectile
+ * through `findByClass` + index and keep the `EntityRef`; a bound cloud then dies when that ref
+ * goes invalid or the index is reused. Unbound clouds still run this lifetime, cut short by
+ * `smokegrenade_expired` when that event is wired through.
  */
 const SMOKE_LIFETIME = 18;
+/** Designer name of the in-world smoke projectile the detonate/expire events name by index. */
+const SMOKE_PROJECTILE = "smokegrenade_projectile";
+/** Live projectile refs, keyed by index, filled from `ctx.entities.onSpawn`. */
+const smokeByIndex = new Map<number, EntityRef>();
 
 const clouds: Cloud[] = [];
 
@@ -248,7 +258,21 @@ export function resetWeaponFx(): void {
   lastDnaRead.clear();
   resetDnaTracking();
   clouds.length = 0;
+  smokeByIndex.clear();
   destroyLiveFragments();
+}
+
+/** A smoke projectile spawned — keep the live ref so detonate does not have to `findByClass`. */
+export function noteSmokeSpawned(ref: EntityRef): void {
+  if (!ref.isValid()) return;
+  smokeByIndex.set(ref.index, ref);
+}
+
+/** The projectile is going away — drop its poison cloud with it. */
+export function noteSmokeDeleted(ref: EntityRef): void {
+  const index = ref.index;
+  smokeByIndex.delete(index);
+  onSmokeExpired(index);
 }
 
 /** Register the event-driven item behaviours. */
@@ -294,7 +318,7 @@ export function readDna(slot: number, body: Body): void {
   // The C# bailed when the victim had no role — nothing to colour the reading with.
   if (body.ownerRole === RoleId.None) return;
 
-  const key = slot * 65536 + body.index;
+  const key = `${slot}:${body.id}`;
   const now = Server.gameTime;
   const last = lastDnaRead.get(key);
   if (last !== undefined && now - last < DNA_COOLDOWN) return;
@@ -624,8 +648,9 @@ export function tickDnaTracker(dt: number): void {
  * effect: anyone inside it who is an Innocent or a Detective takes a tick of poison, drawn from one
  * pool shared by the whole cloud.
  *
- * `entityId` is the projectile index from the event, used only to match a later
- * `smokegrenade_expired`; the cloud still self-expires without it.
+ * `entityId` is the projectile index from the event. We bind a live `EntityRef` at detonate so
+ * a later expire/tick can tell this smoke from whatever reused the number. The cloud still
+ * self-expires on lifetime when no ref could be bound.
  */
 export function onSmokeDetonate(
   thrower: number,
@@ -648,14 +673,42 @@ export function onSmokeDetonate(
     timer: 0,
     life: SMOKE_LIFETIME,
     entity: entityId,
+    ref: bindSmokeRef(entityId),
   });
+}
+
+/** Resolve the detonating projectile. Prefers the onSpawn ledger; `findByClass` is the fallback. */
+function bindSmokeRef(entityId: number): EntityRef | null {
+  if (entityId < 0) return null;
+  const remembered = smokeByIndex.get(entityId);
+  if (remembered !== undefined && refOwnsIndex(remembered, entityId)) return remembered;
+  const found = Entity.findByClass(SMOKE_PROJECTILE);
+  for (let i = 0; i < found.length; i++) {
+    if (found[i]!.index === entityId) return found[i]!;
+  }
+  return null;
+}
+
+/**
+ * True when this cloud should keep ticking.
+ *
+ * A bound ref that is dead or now names a different index means the projectile is gone or the
+ * number was recycled — drop the cloud. Unbound clouds fall through to lifetime / expire.
+ */
+function cloudStillBound(cl: Cloud): boolean {
+  if (cl.ref === null) return true;
+  return refOwnsIndex(cl.ref, cl.entity);
 }
 
 /** The smoke cloud for `entityId` dispersed — its poison goes with it. */
 export function onSmokeExpired(entityId: number): void {
   if (entityId < 0) return;
   for (let i = clouds.length - 1; i >= 0; i--) {
-    if (clouds[i]!.entity === entityId) clouds.splice(i, 1);
+    const cl = clouds[i]!;
+    if (cl.entity !== entityId) continue;
+    // A live ref that no longer owns this index is a different smoke wearing a recycled number.
+    if (cl.ref !== null && cl.ref.isValid() && cl.ref.index !== entityId) continue;
+    clouds.splice(i, 1);
   }
 }
 
@@ -766,6 +819,10 @@ function tickClouds(dt: number): void {
 
   for (let i = clouds.length - 1; i >= 0; i--) {
     const cl = clouds[i]!;
+    if (!cloudStillBound(cl)) {
+      clouds.splice(i, 1);
+      continue;
+    }
     cl.life -= dt;
     // The C# stopped when the projectile went invalid or the shared pool ran dry.
     if (cl.life <= 0 || cl.budget <= 0) {

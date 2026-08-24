@@ -9,6 +9,8 @@
  * lookup hashed a reference and then re-resolved the entity through `Utilities.GetEntityFromIndex`.
  * Here bodies sit in a flat array with two `Map` indexes (by ragdoll entity index, by owner slot),
  * and each body caches its own spawn position so proximity checks never touch the entity at all.
+ * Index lookup re-validates the stored `EntityRef` and evicts a mismatch — a recycled number is
+ * not the corpse we recorded.
  */
 
 import { cfg } from "../core/cvars";
@@ -19,6 +21,14 @@ import { MoveType, RoleId } from "../core/enums";
 import { pawnOf, appliedModelOf } from "./pawn";
 import { roleModel } from "./icons";
 import { wrapEntity } from "@s2script/cs2";
+import {
+  allIndexedBodies,
+  clearIndexedBodies,
+  forgetIndexedBody,
+  lookupBodyByIndex,
+  lookupBodyByOwner,
+  registerIndexedBody,
+} from "./body-index";
 
 /**
  * A corpse wears the uniform its owner was wearing.
@@ -36,6 +46,11 @@ import { wrapEntity } from "@s2script/cs2";
 
 /** A dead player's corpse. */
 export interface Body {
+  /**
+   * Monotonic id minted at spawn. DNA cooldowns and any other per-corpse table must key on this,
+   * not {@link index} — the engine recycles indexes.
+   */
+  id: number;
   /** The ragdoll entity. Goes stale when the round restarts. */
   ref: EntityRef;
   /** Entity index of the ragdoll — what a hit trace is matched against. */
@@ -66,9 +81,8 @@ export interface Body {
   z: number;
 }
 
-const bodies: Body[] = [];
-const byIndex = new Map<number, Body>();
-const byOwner = new Map<number, Body>();
+/** Next {@link Body.id}. Never reused, even across rounds, so a recycled index cannot collide. */
+let nextBodyId = 1;
 
 /** Register the corpse models for the current map. Call from `ctx.server.onPrecache`. */
 export function precacheBodyModels(pc: PrecacheContext): void {
@@ -78,17 +92,22 @@ export function precacheBodyModels(pc: PrecacheContext): void {
 
 /** Every body created this round. DO NOT mutate. */
 export function allBodies(): readonly Body[] {
-  return bodies;
+  return allIndexedBodies() as readonly Body[];
 }
 
-/** The body whose ragdoll has this entity index, or undefined. */
+/**
+ * The body whose ragdoll has this entity index, or undefined.
+ *
+ * Evicts a stored record whose ref is dead or now names a different index — a recycled number is
+ * not the corpse we recorded.
+ */
 export function bodyByEntity(index: number): Body | undefined {
-  return byIndex.get(index);
+  return lookupBodyByIndex(index) as Body | undefined;
 }
 
 /** The body belonging to `slot`, or undefined. */
 export function bodyOfPlayer(slot: number): Body | undefined {
-  return byOwner.get(slot);
+  return lookupBodyByOwner(slot) as Body | undefined;
 }
 
 /**
@@ -182,6 +201,7 @@ export function spawnBody(
   );
 
   const body: Body = {
+    id: nextBodyId++,
     ref: ragdoll,
     index: ragdoll.index,
     owner: slot,
@@ -198,9 +218,7 @@ export function spawnBody(
     y: origin.y,
     z: origin.z,
   };
-  bodies.push(body);
-  byIndex.set(body.index, body);
-  byOwner.set(slot, body);
+  registerIndexedBody(body);
   return body;
 }
 
@@ -284,24 +302,20 @@ function removeBody(body: Body): void {
   // like: the index was ours, we just never logged letting go of it.
   console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE free corpse slot=${String(body.owner)} index=${String(body.index)}`);
   body.ref.acceptInput("Kill");
-  byIndex.delete(body.index);
-  if (byOwner.get(body.owner) === body) byOwner.delete(body.owner);
-  const i = bodies.indexOf(body);
-  if (i >= 0) bodies.splice(i, 1);
+  forgetIndexedBody(body);
 }
 
 /** Drop every tracked body. `removeEntities` also deletes the ragdolls. */
 export function clearBodies(removeEntities: boolean): void {
   if (removeEntities) {
-    for (let i = 0; i < bodies.length; i++) {
-      const b = bodies[i]!;
+    const list = allBodies();
+    for (let i = 0; i < list.length; i++) {
+      const b = list[i]!;
       console.log(`[ttt] t=${Server.gameTime.toFixed(2)} ENTTRACE free corpse slot=${String(b.owner)} index=${String(b.index)} (bulk)`);
       b.ref.acceptInput("Kill");
     }
   }
-  bodies.length = 0;
-  byIndex.clear();
-  byOwner.clear();
+  clearIndexedBodies();
 }
 
 /**
@@ -309,7 +323,8 @@ export function clearBodies(removeEntities: boolean): void {
  *
  * This is the fallback for body identification when an aim trace does not resolve to the ragdoll
  * (a corpse whose model failed to load has no collision to hit). Distances are compared squared —
- * no `sqrt` — against the body's cached spawn position.
+ * no `sqrt`. Prefer the ragdoll's live `EntityRef.origin` (any entity, since sdk 0.21); the cached
+ * spawn/carry position is only for a ref that has already gone stale.
  */
 export function nearestBody(slot: number, maxDistSq: number): Body | undefined {
   const pawn = pawnOf(slot);
@@ -319,11 +334,16 @@ export function nearestBody(slot: number, maxDistSq: number): Body | undefined {
 
   let best: Body | undefined;
   let bestDist = maxDistSq;
-  for (let i = 0; i < bodies.length; i++) {
-    const b = bodies[i]!;
-    const dx = o.x - b.x;
-    const dy = o.y - b.y;
-    const dz = o.z - b.z;
+  const list = allBodies();
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i]!;
+    const live = b.ref.isValid() ? b.ref.origin : null;
+    const bx = live?.x ?? b.x;
+    const by = live?.y ?? b.y;
+    const bz = live?.z ?? b.z;
+    const dx = o.x - bx;
+    const dy = o.y - by;
+    const dz = o.z - bz;
     const d = dx * dx + dy * dy + dz * dz;
     if (d < bestDist) {
       bestDist = d;
