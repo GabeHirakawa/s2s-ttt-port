@@ -244,6 +244,8 @@ interface Cloud {
 const SMOKE_LIFETIME = 18;
 /** Designer name of the in-world smoke projectile the detonate/expire events name by index. */
 const SMOKE_PROJECTILE = "smokegrenade_projectile";
+/** Live projectile refs, keyed by index, filled from `ctx.entities.onSpawn`. */
+const smokeByIndex = new Map<number, EntityRef>();
 
 const clouds: Cloud[] = [];
 
@@ -256,7 +258,21 @@ export function resetWeaponFx(): void {
   lastDnaRead.clear();
   resetDnaTracking();
   clouds.length = 0;
+  smokeByIndex.clear();
   destroyLiveFragments();
+}
+
+/** A smoke projectile spawned — keep the live ref so detonate does not have to `findByClass`. */
+export function noteSmokeSpawned(ref: EntityRef): void {
+  if (!ref.isValid()) return;
+  smokeByIndex.set(ref.index, ref);
+}
+
+/** The projectile is going away — drop its poison cloud with it. */
+export function noteSmokeDeleted(ref: EntityRef): void {
+  const index = ref.index;
+  smokeByIndex.delete(index);
+  onSmokeExpired(index);
 }
 
 /** Register the event-driven item behaviours. */
@@ -661,9 +677,11 @@ export function onSmokeDetonate(
   });
 }
 
-/** Resolve the detonating projectile by class + index. Null when the SDK cannot name it. */
+/** Resolve the detonating projectile. Prefers the onSpawn ledger; `findByClass` is the fallback. */
 function bindSmokeRef(entityId: number): EntityRef | null {
   if (entityId < 0) return null;
+  const remembered = smokeByIndex.get(entityId);
+  if (remembered !== undefined && refOwnsIndex(remembered, entityId)) return remembered;
   const found = Entity.findByClass(SMOKE_PROJECTILE);
   for (let i = 0; i < found.length; i++) {
     if (found[i]!.index === entityId) return found[i]!;

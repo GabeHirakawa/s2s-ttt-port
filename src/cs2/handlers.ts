@@ -142,11 +142,9 @@ export function installBombSuppressor(): void {
  * Grant kevlar **and** a helmet — the port of `SetArmor(config.Armor, config.Helmet)`, whose
  * `ArmorConfig.Helmet` shipped `true`.
  *
- * `CCSPlayer_ItemServices.m_bHasHelmet` is not in the generated schema, so the flag cannot be
- * written directly (the C# wrote it and needed a second `SetStateChanged` on the sub-object before
- * the client saw it at all). The engine's own grant path does both correctly, so the suit is given
- * first and the armour value pinned afterwards — `item_assaultsuit` sets its own amount, which need
- * not be what `sm_ttt_shop_armor_amount` asks for.
+ * The suit is given first and the armour value pinned afterwards — `item_assaultsuit` sets its own
+ * amount, which need not be what `sm_ttt_shop_armor_amount` asks for. The HUD helmet icon is the
+ * controller's `pawnHasHelmet` (now a generated schema field).
  *
  * Role loadouts must NOT come through here: `CS2Player.Armor` passed `withHelmet: false`, so the
  * starting armour of every role is helmetless.

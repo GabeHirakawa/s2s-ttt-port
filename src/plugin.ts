@@ -85,8 +85,8 @@ import {
 import { installEconomy, tickEconomy } from "./shop/economy";
 import { installSpecialRounds, tickSpecialRounds } from "./special/rounds";
 import {
-  installWeaponFx, onHeDetonate, onSmokeDetonate, onSmokeExpired, onWeaponFire,
-  tickWeaponFx, tickDnaTracker,
+  installWeaponFx, noteSmokeDeleted, noteSmokeSpawned, onHeDetonate, onSmokeDetonate,
+  onSmokeExpired, onWeaponFire, tickWeaponFx, tickDnaTracker,
 } from "./shop/weaponfx";
 
 import { tickHud } from "./cs2/hud";
@@ -359,12 +359,27 @@ export default plugin((ctx) => {
     if (game.state === GameState.Waiting) startGame();
   });
 
-  // The engine's own round end must not decide a TTT round, but it does restart the round out from
-  // under us — so suppress the broadcast AND fold the TTT round up behind it.
+  // Engine-originated TerminateRound can be canceled here. `onPre("round_end")` cannot: the
+  // engine fires that event inside the isolate borrow, so a pre-hook is skipped. This hook is
+  // the documented replacement (`ctx.gameRules.onTerminateRound`). TTT's own
+  // `GameRules.terminateRound` does not fire it.
+  ctx.gameRules.onTerminateRound((): HookResultValue | void => {
+    if (game.state !== GameState.InProgress && game.state !== GameState.Countdown) return;
+    return HookResult.Handled;
+  });
+
+  // Belt if a terminate still produces `round_end`: hide the broadcast and fold TTT up behind it.
   ctx.events.onPre("round_end", (): HookResultValue | void => {
     if (game.state !== GameState.InProgress) return;
     onEngineRoundEnd();
     return HookResult.Handled;
+  });
+
+  ctx.entities.onSpawn("smokegrenade_projectile", (ent) => {
+    if (ent !== null) noteSmokeSpawned(ent);
+  });
+  ctx.entities.onDelete("smokegrenade_projectile", (ent) => {
+    if (ent !== null) noteSmokeDeleted(ent);
   });
 
   // A resolved bomb frees up a C4 slot for the "max at once" purchase gate.

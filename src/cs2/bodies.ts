@@ -323,7 +323,8 @@ export function clearBodies(removeEntities: boolean): void {
  *
  * This is the fallback for body identification when an aim trace does not resolve to the ragdoll
  * (a corpse whose model failed to load has no collision to hit). Distances are compared squared —
- * no `sqrt` — against the body's cached spawn position.
+ * no `sqrt`. Prefer the ragdoll's live `EntityRef.origin` (any entity, since sdk 0.21); the cached
+ * spawn/carry position is only for a ref that has already gone stale.
  */
 export function nearestBody(slot: number, maxDistSq: number): Body | undefined {
   const pawn = pawnOf(slot);
@@ -336,9 +337,13 @@ export function nearestBody(slot: number, maxDistSq: number): Body | undefined {
   const list = allBodies();
   for (let i = 0; i < list.length; i++) {
     const b = list[i]!;
-    const dx = o.x - b.x;
-    const dy = o.y - b.y;
-    const dz = o.z - b.z;
+    const live = b.ref.isValid() ? b.ref.origin : null;
+    const bx = live?.x ?? b.x;
+    const by = live?.y ?? b.y;
+    const bz = live?.z ?? b.z;
+    const dx = o.x - bx;
+    const dy = o.y - by;
+    const dz = o.z - bz;
     const d = dx * dx + dy * dy + dz * dz;
     if (d < bestDist) {
       bestDist = d;
