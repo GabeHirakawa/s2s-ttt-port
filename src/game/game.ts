@@ -79,9 +79,13 @@ const FINISHED_TIMEOUT = 10;
  * live, so death is permanent.
  */
 function setEngineRespawnAllowed(on: boolean): void {
+  // `Server.setCvar`, not `Server.command`. A console command is queued to the next frame, so
+  // every caller's "set this BEFORE the respawn loop / BEFORE roles are dealt" comment was false
+  // at runtime — the write landed a frame after the thing it was supposed to gate. Since core #108
+  // setCvar writes ConVarData directly, so getCvar and onCvarChange see it before this returns.
   const v = on ? "1" : "0";
-  Server.command(`mp_respawn_on_death_t ${v}`);
-  Server.command(`mp_respawn_on_death_ct ${v}`);
+  if (!Server.setCvar("mp_respawn_on_death_t", v)) console.log("[ttt] WARN: mp_respawn_on_death_t rejected");
+  if (!Server.setCvar("mp_respawn_on_death_ct", v)) console.log("[ttt] WARN: mp_respawn_on_death_ct rejected");
 }
 
 /** Wire the module to the plugin's bus. Call once from the factory. */
@@ -121,6 +125,9 @@ function eligible(out: number[]): number[] {
   }
   return out;
 }
+
+/** Frames `beginRound` will wait for spawns to land before starting without them. */
+const SPAWN_SETTLE_FRAMES = 4;
 
 const poolBuffer: number[] = [];
 /** Scratch list of slots `syncRoster` newly discovered. */
@@ -176,7 +183,7 @@ export function startGame(quiet = false): void {
   // reaches zero — `mp_ignore_round_win_conditions 1` is set on the very next line — and `beginRound`
   // re-arms the clock with the round length in the same instant the countdown expires.
   GameRules.get()?.setTimeRemaining(cfg.countdownSeconds);
-  Server.command("mp_ignore_round_win_conditions 1");
+  Server.setCvar("mp_ignore_round_win_conditions", "1");
 
   // Put everyone back on T as the countdown OPENS, not just from the 1 Hz countdown ticker: last
   // round's revealed Innocents are still sitting on CT, and the ticker is not guaranteed to run
@@ -189,9 +196,14 @@ export function startGame(quiet = false): void {
   resetTeamsToT();
 
   // Everyone on a playing team but currently dead gets put back in play for the coming round.
-  const active = reg.activeSlots();
+  // Copied, and re-checked per iteration: `activeSlots()` hands back the registry's live
+  // backing array, and since core #108 the outbound call in this loop runs other plugins'
+  // handlers before it returns — one of which can disconnect a player and splice this array
+  // mid-walk. That shifts every later element left, silently skipping someone.
+  const active = reg.activeSlots().slice();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
+    if (!reg.isConnected(slot)) continue;
     if (!reg.isAlive(slot) && isPlayingTeam(slot)) respawn(slot);
   }
 
@@ -213,14 +225,14 @@ export function startGame(quiet = false): void {
  * few frames is imperceptible (~50ms at 64 tick) and is the difference between "we asked the engine
  * to spawn them" and "they are actually in the round".
  */
-const SPAWN_SETTLE_FRAMES = 4;
 
 /**
  * Deal roles and go live.
  *
  * The invariant: EVERY player dealt a role is alive at the moment the round goes live. Anyone on a
- * playing team who is still dead is respawned and the round WAITS for them (up to
- * {@link SPAWN_SETTLE_FRAMES}) rather than starting without them.
+ * playing team who is still dead is respawned first, and because an outbound call now completes
+ * before it returns, that spawn has either landed or been refused by game rules by the time roles
+ * are dealt — no waiting, no retry window.
  */
 function beginRound(attempt = 0): void {
   reg.resyncAlive();
@@ -229,26 +241,52 @@ function beginRound(attempt = 0): void {
   // second, but it is best-effort: a player who connected in the last second, or died in it, reaches
   // here dead — and dealing a role to a dead player produced a round whose participants were lying on
   // the floor before it began, Traitors included, which the win check counts and nobody can kill.
-  const active = reg.activeSlots();
-  let pending = 0;
+  // One sweep, then read the truth. There is no settle loop any more.
+  //
+  // `respawn()` used to be queued to a nextFrame drain, so this function could only count spawns
+  // it had ASKED for and then re-enter itself over four frames hoping they landed. Since core #108
+  // an outbound call completes — and runs every other plugin's handlers — before it returns, so
+  // `resyncAlive()` immediately after the sweep reads the real world. Retrying bought nothing
+  // anyway: a spawn refused by game rules on one frame is refused identically on the next four,
+  // and each re-entry re-issued `respawn()` for everyone still dead, nesting into every other
+  // plugin's `player_spawn` handlers again each time.
+  //
+  // Copied, not the live array: `activeSlots()` returns the registry's backing array and a nested
+  // handler can splice it mid-loop.
+  const active = reg.activeSlots().slice();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
+    if (!reg.isConnected(slot)) continue;   // a nested handler may have dropped them
     if (reg.isAlive(slot) || !isPlayingTeam(slot)) continue;
     respawn(slot);
-    pending++;
   }
   reg.resyncAlive();
 
-  // A spawn is still in flight — come back next frame rather than starting the round without them.
-  // Bounded, so a player the engine simply refuses to spawn cannot stall the round forever; after the
-  // last attempt the round starts with whoever IS alive.
-  if (pending > 0 && attempt < SPAWN_SETTLE_FRAMES) {
+  // Anyone on a playing team still dead means the spawn has not LANDED yet. Wait a frame and try
+  // again rather than dealing a role to a corpse.
+  //
+  // I removed this wait on the reasoning that a nested `respawn()` completes before it returns, so
+  // liveness could be read immediately. The call does complete — but the engine does not place the
+  // player in the world within it, so `resyncAlive()` on this same frame can still read them dead.
+  // The round then went live with participants lying on the floor, including Traitors the win check
+  // counts and nobody can kill. Counting REQUESTS was the old bug; not waiting at all was a worse
+  // one. So: measure liveness, and still wait for it.
+  let stillDead = 0;
+  for (let i = 0; i < active.length; i++) {
+    const slot = active[i]!;
+    if (reg.isConnected(slot) && !reg.isAlive(slot) && isPlayingTeam(slot)) stillDead++;
+  }
+  if (stillDead > 0 && attempt < SPAWN_SETTLE_FRAMES) {
     const mine = epoch;
     nextPreFrame(() => {
       if (mine !== epoch || game.state !== GameState.Countdown) return;
       beginRound(attempt + 1);
     });
     return;
+  }
+  if (stillDead > 0) {
+    // Bounded, so one player the engine simply refuses to spawn cannot stall the round forever.
+    console.log(`[ttt] WARN: starting with ${String(stillDead)} player(s) the engine would not spawn`);
   }
 
   // Spawns have landed (or the settle budget is spent), so close the window: from here on a death is
@@ -272,6 +310,7 @@ function beginRound(attempt = 0): void {
   game.winner = RoleId.None;
   game.startedAt = Server.gameTime;
   // `assignRoles` consumes `pool` in place (swap-and-pop); that is fine, it is rebuilt each round.
+  console.log(`[ttt/trace] beginRound: assigning roles, pool=${pool.length}`);
   game.participants = assignRoles(bus, pool);
 
   // Arm the default round clock BEFORE the InProgress dispatch, not after. `setState` runs its
@@ -282,7 +321,6 @@ function beginRound(attempt = 0): void {
   // side: `SpeedRound.ApplyRoundEffects` disposed `RoundTimerListener.EndTimer` and scheduled its
   // own, so whoever arms last wins and it made sure that was Speed.
   setRoundDeadline(roundDuration(game.participants));
-
   if (!setState(GameState.InProgress)) return;
 
   const traitors = reg.aliveCount(RoleId.Traitor);
@@ -355,7 +393,6 @@ export function checkEndConditions(): boolean {
  * no live pawn to read. Acting on a single observation would kill them off the moment they were
  * dealt the role.
  */
-const suspectedDead = new Uint8Array(MAX_SLOTS);
 
 /**
  * Re-derive the roster and liveness from the ENGINE, and end the round if that changes the answer.
@@ -388,39 +425,18 @@ export function reconcileRound(): void {
   // decrements the alive counter it was still contributing to.
   syncRosterAndAnnounce();
 
-  const active = reg.activeSlots();
-  for (let i = 0; i < active.length; i++) {
-    const slot = active[i]!;
-    // Only participants matter to the win check, and only ones we still believe are alive can be
-    // wrong in the direction that hangs a round.
-    if (!reg.isParticipating(slot) || !reg.isAlive(slot) || reg.computeAlive(slot)) {
-      suspectedDead[slot] = 0;
-      continue;
-    }
-    if (suspectedDead[slot] === 0) {
-      suspectedDead[slot] = 1;
-      continue;
-    }
-    suspectedDead[slot] = 0;
-    silentDeath(slot);
-  }
+  // Liveness is just re-read from the engine now.
+  //
+  // This used to be a two-strike walk that manufactured a synthetic `death` bus event for anyone
+  // we believed alive but the engine said was dead. That machinery existed for one reason: a slay
+  // produced no `player_death` we received, so a slain player stayed "alive" forever and the round
+  // never resolved. Since core #108 a slay fires `player_death` onPre during the call, so there is
+  // nothing left to reconstruct — and reconstructing it cost a full round-hanging poll of latency.
+  reg.resyncAlive();
 
   checkEndConditions();
 }
 
-/**
- * Record a death that no engine event announced.
- *
- * Deliberately NOT a full {@link killWithGadget}: there is no killer to credit and, by the time this
- * notices, no pawn origin left to place a corpse at. What it does do is everything the win condition
- * and the scoreboard depend on — clear the alive flag (and with it the per-role counter) and put the
- * `death` event on the bus so karma, stats and the icon cleanup all see it, with no killer, exactly
- * as a player ducking to spectator produces.
- */
-function silentDeath(slot: number): void {
-  reg.setAlive(slot, false);
-  bus.emit("death", { slot, killer: -1, assister: -1, weapon: "", headshot: false });
-}
 
 /** End the round with `winner` (or {@link RoleId.None} plus a `reason` for a non-role end). */
 export function endGame(winner: RoleId, reason?: string): void {
@@ -456,17 +472,30 @@ export function endGame(winner: RoleId, reason?: string): void {
     Teams.addScore(winner === RoleId.Traitor ? Team.Terrorist : Team.CounterTerrorist, 1);
   }
 
+  // Terminate NOW, and let the ENGINE own the post-round window.
+  //
+  // CS's own shape is: the round ends, everyone keeps running around for
+  // `mp_round_restart_delay` seconds, then the map resets and everyone respawns at their spawn
+  // point. That delay is an argument to `terminateRound`, so passing it here IS the free-roam
+  // window — no second clock on our side.
+  //
+  // This used to wait `timeBetweenRounds` (1s) and THEN terminate with a hard-coded 3, which gave
+  // a ~4s window split across two competing timers, neither matching `mp_round_restart_delay`.
+  const postRound = Math.max(1, cfg.postRoundSeconds);
+  Server.setCvar("mp_round_restart_delay", String(postRound));
+
   const mine = ++epoch;
-  void delay(cfg.timeBetweenRounds * 1000).then(() => {
-    nextPreFrame(() => {
-      if (mine !== epoch) return;
-      // When the ENGINE ended this round its own restart is already pending (mp_round_restart_delay),
-      // so terminating again here would cut the restarting round short a second or two in.
-      if (engineDriven) return;
-      Server.command("mp_ignore_round_win_conditions 1");
-      GameRules.terminateRound(endReason, 3);
-      Server.command("mp_ignore_round_win_conditions 0");
-    });
+  nextPreFrame(() => {
+    if (mine !== epoch) return;
+    // When the ENGINE ended this round its own restart is already pending, so terminating again
+    // would cut the restarting round short a second or two in.
+    if (engineDriven) return;
+    // These bracket the terminate. They did not before: `terminateRound` is a synchronous engine
+    // call while both `Server.command` writes sat in the console buffer, so the real order was
+    // terminate-then-both-writes and the guard never covered the call it guards.
+    Server.setCvar("mp_ignore_round_win_conditions", "1");
+    GameRules.terminateRound(endReason, postRound);
+    Server.setCvar("mp_ignore_round_win_conditions", "0");
   });
 
   // Watchdog on FINISHED. Nothing inside TTT drives the round forward from here: the next round is
@@ -475,7 +504,7 @@ export function endGame(winner: RoleId, reason?: string): void {
   // restart never arrives — a terminate the engine dropped, an admin freezing the round, a map
   // running its own round logic — the mode deadlocks with everyone stood in the end-of-round
   // reveal forever. Fall back to WAITING and let the idle poller take it from there.
-  void delay((cfg.timeBetweenRounds + FINISHED_TIMEOUT) * 1000).then(() => {
+  void delay((cfg.postRoundSeconds + FINISHED_TIMEOUT) * 1000).then(() => {
     nextPreFrame(() => {
       // Any legitimate restart moves the state on (and `startGame` bumps `epoch`), so a live token
       // AND a still-FINISHED state together mean the restart really is never coming.
@@ -558,8 +587,11 @@ export function onEngineRoundStart(): void {
  *
  * `startGame` respawns once when the countdown opens, but anyone who connects (or finishes
  * spawning) during the countdown would otherwise still be dead at `beginRound` and get skipped —
- * `eligible()` only deals roles to the living. Respawns are queued a frame out, so doing this
- * repeatedly through the countdown is what actually gets them in.
+ * `eligible()` only deals roles to the living. This sweep is NOT a retry — since core #108 a
+ * respawn either takes on this call or is refused by game rules, and would be refused
+ * identically a second later. It exists for players who join or change team DURING the
+ * countdown (bots included, which never fire `ctx.clients.onActive`), and for last round's
+ * revealed Innocents still sitting on CT.
  */
 let countdownAccum = 0;
 export function tickCountdown(dt: number): void {
@@ -577,9 +609,14 @@ export function tickCountdown(dt: number): void {
   // player revealed last round is still put back before assignment.
   resetTeamsToT();
 
-  const active = reg.activeSlots();
+  // Copied, and re-checked per iteration: `activeSlots()` hands back the registry's live
+  // backing array, and since core #108 the outbound call in this loop runs other plugins'
+  // handlers before it returns — one of which can disconnect a player and splice this array
+  // mid-walk. That shifts every later element left, silently skipping someone.
+  const active = reg.activeSlots().slice();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
+    if (!reg.isConnected(slot)) continue;
     if (!isPlayingTeam(slot)) {
       continue;
     }

@@ -37,6 +37,10 @@
  */
 
 import { plugin } from "@s2script/sdk/plugin";
+import { tell, tellAll, pawnOf } from "./cs2/pawn";
+import { queueSlays, serveRoundStart, resetSanctions } from "./rdm/sanctions";
+import { Admin, ADMFLAG } from "@s2script/sdk/admin";
+import { TttHud, setTttHud, getTttHud } from "./cs2/ttthud";
 import { Server } from "@s2script/sdk/server";
 import { bindPreFrameIdentity, drainPreFrame } from "./core/preframe";
 import { teardownWorld } from "./core/teardown";
@@ -138,7 +142,7 @@ function installTranslations(): void {
  */
 function applyServerSettings(): void {
   // TTT decides its own round outcomes — without this the engine ends rounds out from under it.
-  Server.command("mp_ignore_round_win_conditions 1");
+  Server.setCvar("mp_ignore_round_win_conditions", "1");
   // The engine's idle-kick fights the mode: TTT players legitimately stand still (working out who
   // to trust, watching a body, waiting out a countdown) and get kicked for it. TTT does its own,
   // gentler AFK handling — a warning, then a move to spectator, never a kick.
@@ -258,7 +262,12 @@ export default plugin((ctx) => {
       if (ev.state !== GameState.InProgress) {
         // A menu printed last round must not still be answerable this one: its numbering came from
         // the old role and balance, so a stale digit would buy something the player never saw.
-        if (ev.state === GameState.Finished) resetShopMenus();
+        if (ev.state === GameState.Finished) {
+          resetShopMenus();
+          // Drop the traitor badge and any open shop at round end. Leaving the badge up would keep
+          // showing a dead round's roster into the next one.
+          getTttHud()?.resetAll();
+        }
         return;
       }
       refresh();
@@ -275,6 +284,8 @@ export default plugin((ctx) => {
   syncRosterAndAnnounce();
 
   ctx.clients.onActive((client) => {
+    // Panels default VISIBLE in the markup, so collapse them until asked for.
+    getTttHud()?.hideAll(client.slot);
     reg.addPlayer(client.slot, client.steamId, client.name);
     reg.setAlive(client.slot, reg.computeAlive(client.slot));
     bus.emit("join", { slot: client.slot });
@@ -300,6 +311,7 @@ export default plugin((ctx) => {
   });
 
   ctx.clients.onDisconnect((client) => {
+    getTttHud()?.forget(client.slot);
     bus.emit("leave", { slot: client.slot });
     reg.removePlayer(client.slot);
     invalidatePawnCache();
@@ -351,6 +363,7 @@ export default plugin((ctx) => {
     removeBuyZones();
     invalidatePawnCache();
     onEngineRoundStart();
+    serveQueuedSlays();
   });
 
   // Warmup blocks the round start; pick it back up the moment warmup finishes.
@@ -513,6 +526,22 @@ export default plugin((ctx) => {
   });
 
   // ── commands ──────────────────────────────────────────────────────────────
+  // Panorama HUD (traitor badge + clickable shop). Constructed before commands so `!shop` can
+  // reach it. Degrades to nothing for players without the workshop addon — see cs2/ttthud.ts.
+  const ui = new TttHud(
+    ctx,
+    (line) => console.log(`[ttt/ui] ${line}`),
+    (slot) => Admin.forSlot(slot)?.hasFlags(ADMFLAG.GENERIC) ?? false,
+  );
+  setTttHud(ui);
+  // A Guilty verdict queues slays rather than killing now: the accused is usually dead or gone by
+  // the time an admin rules, and a slay that lands on nobody is the same as no punishment at all.
+  ui.onGuilty = (steamId, name, slays, admin) => {
+    const total = queueSlays(steamId, name, slays);
+    console.log(`[ttt/rdm] ${admin} queued ${slays} slay(s) for ${name} (${total} owed)`);
+    tellAll(`[ttt] ${name} was found guilty of RDM — ${total} slay(s) queued.`);
+  };
+
   registerCommands(ctx.commands);
   ctx.commands.onClientCommand("jointeam", onJoinTeamCommand);
 
@@ -524,3 +553,32 @@ export default plugin((ctx) => {
     },
   };
 });
+
+/**
+ * Serve one queued RDM slay per sanctioned player, at round start.
+ *
+ * `pawn.slay()` now fires `player_death` synchronously — the engine call is wrapped in an outbound
+ * nest token, so TTT's own `player_death` onPre runs before `slay()` returns. What it does NOT do
+ * here is mark the player dead in the registry: at `round_start` the game state is still
+ * Waiting/Countdown, so `onDeathPre` takes its `!inProgress()` early return. Hence the explicit
+ * `resyncAlive()` below rather than waiting on the 1 Hz reconcile.
+ *
+ * A player with no pawn yet keeps the debt for next round rather than having it forgiven.
+ */
+function serveQueuedSlays(): void {
+  // `.map` already copies, so a nested handler splicing the registry cannot shift this walk.
+  const connected = reg.activeSlots().map((slot: number) => ({ slot, steamId: reg.steamIdOf(slot) }));
+  const served = serveRoundStart(connected, (slot) => {
+    const pawn = pawnOf(slot);
+    if (pawn === null || !reg.isAlive(slot)) return false;
+    pawn.slay();
+    return true;
+  });
+  reg.resyncAlive();
+  for (const s of served) {
+    // A nested death can carry the round to an end from inside this loop; stop talking about
+    // sanctions for a round that is already over.
+    if (game.state !== GameState.InProgress && game.state !== GameState.Countdown) break;
+    tell(s.slot, `[ttt] Slain for RDM.${s.remaining > 0 ? ` ${s.remaining} slay(s) remaining.` : ""}`);
+  }
+}

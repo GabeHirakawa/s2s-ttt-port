@@ -13,6 +13,8 @@
  */
 
 import { Server } from "@s2script/sdk/server";
+import { resetSanctions } from "../rdm/sanctions";
+import { resetReports } from "../rdm/reports";
 import type { EventBus } from "./bus";
 import type { TttEvents } from "./events";
 import { bumpMapEpoch, clearPreFrame } from "./preframe";
@@ -34,6 +36,7 @@ import { resetShop } from "../shop/shop";
 import { resetShopMenus } from "../commands";
 import { resetRound } from "../karma/karma";
 import { clearSpecialRounds } from "../special/rounds";
+import { getTttHud } from "../cs2/ttthud";
 
 /** Why teardown is running. Unload abandons the round; map change uses the existing fold-up. */
 export type TeardownReason = "unload" | "map";
@@ -68,12 +71,19 @@ export function teardownWorld(bus: EventBus<TttEvents>, reason: TeardownReason):
   clearSpecialRounds();
   resetSpoof();
   resetHud();
+  // Panorama panels persist on the client until told otherwise, so an unload must clear them
+  // explicitly — otherwise a reload leaves a stale badge on every traitor's screen.
+  getTttHud()?.resetAll();
   unmuteAll();
   resetShopMenus();
   clearBenched();
   clearReservedRoles();
   clearPreFrame();
   resetShop();
+  // A slay queue and a report queue are per-map: leaving must not dodge a sanction, but nobody
+  // should carry one into a session hours later with no idea why they died.
+  resetSanctions();
+  resetReports();
   resetAfk();
   resetRound();
   clearAppliedModels();
@@ -84,6 +94,6 @@ export function teardownWorld(bus: EventBus<TttEvents>, reason: TeardownReason):
     // "[T] Bob" on the scoreboard because the roster was already gone.
     reg.resetRegistry();
     bus.clear();
-    Server.command("mp_ignore_round_win_conditions 0");
+    Server.setCvar("mp_ignore_round_win_conditions", "0");
   }
 }

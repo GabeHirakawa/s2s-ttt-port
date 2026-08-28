@@ -21,6 +21,7 @@ import { clearSlot, give, resolveWeapon, slotOf, stripToSidearms } from "../cs2/
 import { applyRoleTeam } from "./teams";
 
 import { nextPreFrame } from "../core/preframe";
+import { getTttHud } from "../cs2/ttthud";
 
 /** The display name for a role, resolved through the phrase table. */
 export function roleName(role: RoleId): string {
@@ -241,8 +242,16 @@ export function applyLoadout(slot: number, role: RoleId): void {
  */
 export function stripRoundWeapons(): void {
   if (!cfg.stripOnAssign) return;
-  const active = reg.activeSlots();
-  for (let i = 0; i < active.length; i++) stripToSidearms(active[i]!);
+  // Copied, and re-checked per iteration: `activeSlots()` hands back the registry's live
+  // backing array, and since core #108 the outbound call in this loop runs other plugins'
+  // handlers before it returns — one of which can disconnect a player and splice this array
+  // mid-walk. That shifts every later element left, silently skipping someone.
+  const active = reg.activeSlots().slice();
+  for (let i = 0; i < active.length; i++) {
+    const slot = active[i]!;
+    if (!reg.isConnected(slot)) continue;
+    stripToSidearms(slot);
+  }
 }
 
 /**
@@ -260,6 +269,16 @@ export function revealTraitorBuddies(): void {
 
   for (let i = 0; i < traitors.length; i++) {
     const me = traitors[i]!;
+
+    // Panorama badge, top-right. This ADDS to the chat reveal rather than replacing it: chat
+    // scrolls away within seconds and a traitor needs the roster available all round, but a player
+    // without the workshop addon sees no panel at all — so the chat line stays as the floor.
+    const mates: string[] = [];
+    for (let j = 0; j < traitors.length; j++) {
+      if (j !== i) mates.push(reg.nameOf(traitors[j]!));
+    }
+    getTttHud()?.showTraitor(me, mates);
+
     if (traitors.length === 1) {
       tell(me, msgFor(me, "ROLE_REVEAL_TRAITORS_NONE"));
       continue;

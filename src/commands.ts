@@ -11,6 +11,8 @@
  */
 
 import type { CtxCommands } from "@s2script/sdk/plugin";
+import { steamIdOf } from "./core/registry";
+import { file as fileReport, FileResult, REPORTS_PER_ROUND, pending as pendingReports } from "./rdm/reports";
 import type { CommandInvocation } from "@s2script/sdk/commands";
 import { ADMFLAG, Admin } from "@s2script/sdk/admin";
 import { ChatColors } from "@s2script/cs2";
@@ -34,6 +36,7 @@ import {
   type ShopItem,
 } from "./shop/shop";
 import { roundIds, startSpecialRounds } from "./special/rounds";
+import { getTttHud } from "./cs2/ttthud";
 
 /** Reusable buffer for the shop listing — one allocation for the plugin's lifetime. */
 const listBuffer: ShopItem[] = [];
@@ -293,10 +296,90 @@ export function registerCommands(commands: CtxCommands): void {
     if (desc !== "" && desc !== item.descKey) cmd.reply(msgFor(cmd.callerSlot, "SHOP_PURCHASED_DETAIL", desc));
   };
 
+
+  // ── RDM reporting ─────────────────────────────────────────────────────────────────────────────
+  // Players file; admins adjudicate. Chat stays the transport for the reason because typing detail
+  // into a Panorama field is not something the custom HUD gives us — only state crosses the wire.
+
+  commands.register("sm_report", (cmd) => {
+    const slot = cmd.callerSlot;
+    if (slot < 0) { cmd.reply(msgFor(slot, "GENERIC_PLAYER_ONLY")); return; }
+    const targetQuery = cmd.arg(0);
+    const reason = cmd.argsFrom(1).trim();
+    if (targetQuery === "" || reason === "") {
+      cmd.reply(msgFor(slot, "GENERIC_USAGE", "report <player> <what happened>"));
+      return;
+    }
+    const accused = resolveTarget(targetQuery);
+    if (accused < 0) { cmd.reply(msgFor(slot, "GENERIC_NO_TARGET", targetQuery)); return; }
+
+    const { result, report } = fileReport({
+      reporterSlot: slot, reporterName: reg.nameOf(slot),
+      accusedSlot: accused, accusedName: reg.nameOf(accused),
+      accusedSteamId: steamIdOf(accused),
+      reason, round: game.roundsThisMap, now: Date.now() / 1000,
+    });
+
+    if (result === FileResult.SelfReport)  { cmd.reply("[ttt] You cannot report yourself."); return; }
+    if (result === FileResult.EmptyReason) { cmd.reply("[ttt] Describe what happened."); return; }
+    if (result === FileResult.Duplicate)   { cmd.reply("[ttt] You already reported them this round."); return; }
+    if (result === FileResult.RateLimited) {
+      cmd.reply(`[ttt] Report limit reached (${REPORTS_PER_ROUND} per round).`);
+      return;
+    }
+    cmd.reply("[ttt] Report filed. An admin will review it.");
+    if (report) {
+      getTttHud()?.notifyAdmins("RDM report", `${report.reporterName} → ${report.accusedName}`);
+    }
+  });
+
+  // Spawning the layout entity MUST happen in a command dispatch — doing it from a frame
+  // segfaulted a live server at round start. So it is an explicit admin action, not implicit.
+  commands.registerAdmin("sm_ttt_hud", ADMFLAG.GENERIC, (cmd) => {
+    const hud = getTttHud();
+    if (!hud) { cmd.reply("[ttt] HUD unavailable."); return; }
+    const why = hud.ensure();
+    cmd.reply(why === null ? "[ttt] HUD layout spawned." : `[ttt] HUD not ready: ${why}`);
+  });
+
+  commands.registerAdmin("sm_rdm", ADMFLAG.GENERIC, (cmd) => {
+    const slot = cmd.callerSlot;
+    const queue = pendingReports();
+    if (slot < 0) {
+      // Console has no HUD; give it the queue as text rather than nothing.
+      cmd.reply(`[ttt] ${queue.length} pending report(s)`);
+      for (const r of queue) {
+        cmd.reply(`  #${r.id} ${r.reporterName} -> ${r.accusedName} (round ${r.round}): ${r.reason}`);
+      }
+      return;
+    }
+    if (queue.length === 0) { cmd.reply("[ttt] No pending reports."); return; }
+    const hud = getTttHud();
+    if (!hud) { cmd.reply("[ttt] HUD unavailable."); return; }
+    hud.openRdm(slot);
+  });
+
   commands.register("sm_balance", balance);
   commands.register("sm_bal", balance);
   commands.register("sm_credits", balance);
   commands.register("sm_points", balance);
+  // !shop — the clickable Panorama shop. Falls back to telling the player how to use the text
+  // commands when they have no HUD, rather than appearing to do nothing.
+  /** Try the Panorama shop. False = no HUD available, caller should fall back. */
+  const openShopHud = (slot: number): boolean => {
+    const ui = getTttHud();
+    if (!ui) return false;
+    if (ui.isShopOpen(slot)) { ui.closeShop(slot); return true; }
+    return ui.openShop(slot);
+  };
+
+  const shopMenu = (cmd: CommandInvocation): void => {
+    const slot = cmd.callerSlot;
+    if (slot < 0) { cmd.reply("sm_shop needs an in-game caller"); return; }
+    if (!openShopHud(slot)) openShopMenu(slot);
+  };
+  commands.register("sm_shopmenu", shopMenu);
+
   commands.register("sm_buy", buy);
   commands.register("sm_purchase", buy);
   commands.register("sm_b", buy);
@@ -333,8 +416,11 @@ export function registerCommands(commands: CtxCommands): void {
         return;
       case "":
       case "list":
-        if (cmd.callerSlot >= 0) openShopMenu(cmd.callerSlot);
-        else list(cmd);
+        if (cmd.callerSlot < 0) { list(cmd); return; }
+        // Custom HUD first, chat menu second. `openShopHud` returns false when the layout entity
+        // has not been spawned (`sm_ttt_hud`) or the player has not mounted the workshop addon —
+        // in either case the mode has to stay playable, so the chat menu is the floor.
+        if (!openShopHud(cmd.callerSlot)) openShopMenu(cmd.callerSlot);
         return;
       default:
         cmd.reply(msgFor(cmd.callerSlot, "GENERIC_USAGE", "shop <list|buy [item]|balance>"));

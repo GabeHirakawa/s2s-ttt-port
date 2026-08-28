@@ -14,6 +14,7 @@ import { Entity } from "@s2script/sdk/entity";
 import { HookResult, type HookResultValue } from "@s2script/sdk/events";
 import { UserMessages } from "@s2script/sdk/usermessages";
 import { Player } from "@s2script/cs2";
+import { Server } from "@s2script/sdk/server";
 import { Trace, TraceMask } from "@s2script/sdk/trace";
 import { Vector } from "@s2script/sdk/math";
 import { hudLine, HUD_FONT_BIG, setCenterHud } from "./hud";
@@ -115,7 +116,15 @@ export function removeBuyZones(): void {
   // Do not burn the one-shot on a round that fired before the map's own entities existed; a map
   // with no buy zones at all just re-scans (a handful of pointer compares) each round.
   if (zones.length === 0) return;
-  for (let i = 0; i < zones.length; i++) zones[i]!.remove();
+  // Re-validate each ref inside the loop. `remove()` used to be queued to a frame drain, which
+  // made a captured array safe to walk; since core #108 an outbound call NESTS — other plugins'
+  // entity handlers run before it returns, and one of them can take an entity later in this same
+  // array. Walking it blind then reads a freed ref.
+  for (let i = 0; i < zones.length; i++) {
+    const zone = zones[i]!;
+    if (!zone.isValid()) continue;
+    zone.remove();
+  }
   zonesRemoved = true;
 }
 
@@ -636,10 +645,18 @@ export function onJoinTeamCommand(slot: number, argString: string): HookResultVa
 }
 
 /**
- * Deny engine buy-menu grants during a live round. Shop aliases are re-routed through
- * {@link tryPurchase} on the next PRE tick so `giveNamedItem` is not nested inside CanAcquire
- * (s2script currently drops nested acquire votes). `item_purchase` remains the fallback strip
- * if this hook is missing or the host still grants.
+ * Deny engine buy-menu grants during a live round, and serve TTT shop aliases in their place.
+ *
+ * The purchase runs INLINE. It used to be pushed to the next PRE tick on the belief that a nested
+ * `giveNamedItem` inside CanAcquire would have its acquire vote dropped. That is not what happens:
+ * core names this exact case (`v8host.rs`, "Same hook already on the stack: giveNamedItem from
+ * onCanAcquire") and skips-and-names the inner dispatch so the engine grant proceeds unhooked,
+ * while `prev_acq` is saved and restored around it so THIS handler's vote is folded and written
+ * back intact.
+ *
+ * Deferring also had a real bug: the job carried a round epoch, so a buy near a round boundary was
+ * dropped by the staleness check after the engine had already been denied — the player got no
+ * weapon and no shop item.
  */
 export function onCanAcquire(view: CanAcquireView): HookResultValue | void {
   if (view.method !== AcquireMethod.Buy) return;
@@ -647,17 +664,40 @@ export function onCanAcquire(view: CanAcquireView): HookResultValue | void {
   const slot = view.player?.slot ?? -1;
   const itemId = BUY_BY_DEF[view.defIndex];
   view.result = AcquireResult.InvalidItem;
-  if (itemId !== undefined && slot >= 0) {
+  if (itemId !== undefined && slot >= 0 && !isRepeatAcquire(slot, view.defIndex)) {
     const item = itemById(itemId);
-    if (item !== undefined) {
-      nextPreFrame(() => {
-        if (!inProgress() || !reg.isAlive(slot)) return;
-        if (tryPurchase(slot, item) !== PurchaseResult.Success) return;
-        tell(slot, msgFor(slot, "SHOP_PURCHASED", msgFor(slot, item.nameKey)));
-      }, { slot });
+    if (item !== undefined && tryPurchase(slot, item) === PurchaseResult.Success) {
+      tell(slot, msgFor(slot, "SHOP_PURCHASED", msgFor(slot, item.nameKey)));
     }
   }
   return HookResult.Handled;
+}
+
+/** Per-(slot,item) acquire de-bounce window, in seconds of game time. */
+const ACQUIRE_DEBOUNCE = 0.25;
+const lastAcquire = new Map<number, { def: number; at: number }>();
+
+/**
+ * True when this is the engine asking about the same item again, rather than a fresh buy.
+ *
+ * `CanAcquire` is a QUESTION, not a purchase event: the engine asks it more than once around a
+ * single buy (and again as the menu re-evaluates), so running the purchase on every call charged
+ * the player repeatedly and spammed the SHOP_PURCHASED line. The old deferred version hid this by
+ * accident — it coalesced through a per-slot pre-frame job — so inlining the purchase, which is
+ * otherwise correct, exposed it.
+ */
+function isRepeatAcquire(slot: number, def: number): boolean {
+  const now = Server.gameTime;
+  const prev = lastAcquire.get(slot);
+  if (prev !== undefined && prev.def === def && now - prev.at < ACQUIRE_DEBOUNCE) return true;
+  lastAcquire.set(slot, { def, at: now });
+  return false;
+}
+
+/** Drop a player's de-bounce state. Called on disconnect and round reset. */
+export function resetAcquireDebounce(slot = -1): void {
+  if (slot < 0) lastAcquire.clear();
+  else lastAcquire.delete(slot);
 }
 
 export function onTeamChange(slot: number, newTeam: Team, disconnecting = false): void {
