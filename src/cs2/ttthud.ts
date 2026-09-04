@@ -145,8 +145,8 @@ export class TttHud {
       subtitle: (slot) => {
         const at = this.logAt.get(slot) ?? 0;
         const n = this.logRows.length;
-        return `round ${this.logRound} · ${n} entr${n === 1 ? "y" : "ies"}` +
-          (this.logTotal > 1 ? ` · ${at + 1}/${this.logTotal}` : "");
+        return `round ${this.logRound} - ${n} entr${n === 1 ? "y" : "ies"}` +
+          (this.logTotal > 1 ? ` - ${at + 1}/${this.logTotal}` : "");
       },
       pageSize: LOG_PAGE,
       width: "xl",
@@ -157,8 +157,8 @@ export class TttHud {
       // Three, because the log always pages and paging claims the trailing two footer slots.
       buttons: [
         { text: "Close", variant: "ghost", onClick: (slot) => this.closeLogs(slot) },
-        { text: "◀ older", variant: "ghost", onClick: (slot) => this.stepLog(slot, +1) },
-        { text: "newer ▶", variant: "ghost", onClick: (slot) => this.stepLog(slot, -1) },
+        { text: "Older", variant: "ghost", onClick: (slot) => this.stepLog(slot, +1) },
+        { text: "Newer", variant: "ghost", onClick: (slot) => this.stepLog(slot, -1) },
       ],
     };
 
@@ -300,7 +300,7 @@ export class TttHud {
     const why = this.refusal(slot, item);
     return [
       msgFor(slot, item.nameKey),
-      `${String(item.price)} credits — you have ${String(balanceOf(slot))}`,
+      `${String(item.price)} credits - you have ${String(balanceOf(slot))}`,
       why === PurchaseResult.Success ? "Press Buy to purchase" : resultMessage(why),
       msgFor(slot, item.descKey),
     ];
@@ -337,8 +337,8 @@ export class TttHud {
     this.ui.toast(slot, {
       title: ok ? "Purchased" : "Failed",
       message: ok
-        ? (detail === "" ? name : `${name} — ${detail}`)
-        : `${name} — ${resultMessage(result)}`,
+        ? (detail === "" ? name : `${name} - ${detail}`)
+        : `${name} - ${resultMessage(result)}`,
       variant: ok ? "good" : "bad",
       holdSeconds: 4,
     });
@@ -449,10 +449,19 @@ export class TttHud {
     this.rdm?.close(slot);
   }
 
+  /**
+   * ASCII ONLY in anything bound for a dialog variable.
+   *
+   * This row's `a` cell used "reporter → accused" and rendered EMPTY on a live client while its
+   * sibling `b`/`c` cells (round number, relative time — both plain ASCII) drew correctly. The
+   * centre-screen HUD has form previously: a left-arrow glyph there rendered as nothing while `>`
+   * came through fine. Rather than establish exactly which code points survive, nothing user-facing
+   * uses any. It costs a prettier separator and removes a whole class of silent blank.
+   */
   private rdmRows(): Row[] {
     const now = Date.now() / 1000;
     return pending().map((r) => ({
-      a: `${r.reporterName} → ${r.accusedName}`,
+      a: `${r.reporterName} vs ${r.accusedName}`,
       b: `round ${r.round}`,
       c: ago(r.filed, now),
     }));
@@ -465,9 +474,9 @@ export class TttHud {
     const priors = guiltyCount(sel.accusedSteamId);
     return [
       `${sel.reporterName} reported ${sel.accusedName}`,
-      `round ${sel.round} · ${ago(sel.filed, Date.now() / 1000)}`,
+      `round ${sel.round} - ${ago(sel.filed, Date.now() / 1000)}`,
       `Convict applies ${n} slay${n === 1 ? "" : "s"}` +
-        (priors > 0 ? ` · ${priors} prior guilty verdict${priors === 1 ? "" : "s"} this map` : ""),
+        (priors > 0 ? ` - ${priors} prior guilty verdict${priors === 1 ? "" : "s"} this map` : ""),
       // Last line is the library's clamped box. Already escaped and length-capped by the report
       // store — a reason is the one string here a player controls.
       sel.reason,
@@ -563,7 +572,7 @@ export class TttHud {
     this.ui.toast(slot, {
       title: v === Verdict.Guilty ? "Guilty" : "Not guilty",
       message: v === Verdict.Guilty
-        ? `${ruled.accusedName} — ${ruled.slays} slay(s)`
+        ? `${ruled.accusedName} - ${ruled.slays} slay(s)`
         : ruled.accusedName,
       variant: v === Verdict.Guilty ? "bad" : "good",
       holdSeconds: 4,
