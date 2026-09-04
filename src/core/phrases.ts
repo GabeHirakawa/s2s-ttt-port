@@ -67,9 +67,9 @@ export const PHRASES: Readonly<Record<string, string>> = {
   // --- RDM: the victim prompt, the report, the admin notice ------------------
   // A suspicious kill asks the VICTIM a question rather than accusing anyone. The wording matters:
   // "was this RDM?" invites a reflex yes, so both options state what they mean in full.
-  RDM_ASK_TITLE: "Were you RDM'd by {1}?",
-  RDM_ASK_YES: "Yes - this was RDM",
-  RDM_ASK_NO: "No - that was a good kill",
+  RDM_ASK_TITLE: "%PREFIX%{red}Were you RDM'd by {yellow}{1}{red}?",
+  RDM_ASK_YES: "%PREFIX%{grey}Type {green}!rdmyes{grey} - yes, this was RDM",
+  RDM_ASK_NO: "%PREFIX%{grey}Type {yellow}!rdmno{grey} - no, that was a good kill",
   RDM_ASK_CONTEXT: "%PREFIX%{grey}Type in chat what {yellow}{1}{grey} did. Your next message is sent to the admins (or type {yellow}cancel{grey}).",
   RDM_ASK_DISMISSED: "%PREFIX%{grey}No report filed.",
   RDM_ASK_EXPIRED: "%PREFIX%{grey}Report timed out - nothing was sent.",
