@@ -46,6 +46,7 @@ import { resetBuyMenu, tickBuyMenu } from "./cs2/buymenu";
 import { queueSlays, serveRoundStart, resetSanctions, recordGuilty, pardon } from "./rdm/sanctions";
 import { captureSay, installRdmFlow, resetRdmFlow, tickRdmFlow } from "./rdm/flow";
 import { logCount, logRoundAt, makeLogRows } from "./game/logger";
+import { applyRoleModel } from "./cs2/icons";
 import { Bans } from "@s2script/sdk/bans";
 import { Clients } from "@s2script/sdk/clients";
 import { Admin, ADMFLAG } from "@s2script/sdk/admin";
@@ -372,6 +373,10 @@ export function OnPluginStart(): void {
     // A leaving player fires `player_team` for team None on the way out; the flag lets the team
     // guard tell that apart from a live player ducking to spectator, which it must undo.
     onTeamChange(slot, ev.getInt("team") as Team, ev.getBool("disconnect"));
+    // FORCED re-dress. CS2 picks the agent model from the TEAM, so a team change re-skins the pawn
+    // in place — same pawn, same index, same liveness id — which the identity-keyed guard cannot
+    // see. Re-asserting only on spawn missed it entirely, because a team change need not respawn.
+    if (!ev.getBool("disconnect")) applyRoleModel(slot, true);
     // A team change alters who is eligible; re-derive liveness and re-check the round.
     reg.resyncAlive();
     checkEndConditions();
