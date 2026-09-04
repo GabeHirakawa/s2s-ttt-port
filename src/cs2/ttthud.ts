@@ -416,6 +416,17 @@ export class TttHud {
   isRdmOpen(slot: number): boolean { return this.rdm?.isOpen(slot) ?? false; }
 
   openRdm(slot: number): void {
+    // ensure() FIRST, exactly as openShop / openLogs / openLogBrowser do — this was the one open
+    // path that skipped it. `ensure` spawns the layout entity; without it every set/setClass below
+    // returns "not ready" and paints NOTHING, silently. So the RDM manager worked only when some
+    // other surface had already spawned the entity (the shop, usually) and drew nothing at all when
+    // it was the first thing opened — which from the outside is indistinguishable from a missing
+    // panel, and was diagnosed as one for hours.
+    const why = this.ui.ensure();
+    if (why !== null) {
+      this.log(`rdm HUD unavailable: ${why}`);
+      return;
+    }
     const rdm = this.claimRdm();
     if (rdm === null) return;
     this.ui.hideAll(slot);
@@ -423,6 +434,12 @@ export class TttHud {
     this.slayOverride.delete(slot);
     this.banArmed.delete(slot);
     rdm.open(slot);
+    // Server-side truth about what was drawn, matching the shop's line. "Nothing on screen" has two
+    // very different causes — we painted nothing, or we painted and the layout did not show it —
+    // and without this there is no way to tell them apart from a log.
+    const b = this.ui.budget();
+    this.log(`rdm opened for slot ${slot}: ${pending().length} pending | ` +
+      `interned ${b.panelIds} id(s) / ${b.variables} var(s) / ${b.classNames} class(es)`);
   }
 
   closeRdm(slot: number): void {
