@@ -657,7 +657,7 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
  * and the snapshot going out. `setModel` re-stages a pawn every client holds, so the phase matters
  * more here than almost anywhere else in the mode.
  */
-export function applyRoleModel(slot: number): void {
+export function applyRoleModel(slot: number, force = false): void {
   const role = reg.roleOf(slot);
   // A spectator has no pawn to dress and no role to advertise.
   if (role === RoleId.Spectator) return;
@@ -673,7 +673,16 @@ export function applyRoleModel(slot: number): void {
     // engine recycles indices and a respawn very often reuses the one it just freed. Comparing the
     // index alone reported "already dressed" about a brand-new pawn and left the team agent on it,
     // which is exactly how a revealed Innocent kept showing up in FBI kit.
-    if (modelWasAppliedTo(slot, index, id) && appliedModelOf(slot) === want) return;
+    // `force` bypasses the "this pawn already wears it" test.
+    //
+    // The test is keyed on pawn identity, which only detects the engine REPLACING a pawn. It cannot
+    // detect the engine re-skinning one in place — and a team change does exactly that: CS2 picks
+    // the agent from the team, so a player moved T->CT gets the CT agent on the SAME pawn, with the
+    // same index and the same liveness id. Our record still says "T model, this pawn", the test
+    // agrees, and the re-dress is skipped while the player stands there in the wrong uniform.
+    //
+    // That is why re-applying on spawn alone was not enough: there was no spawn.
+    if (!force && modelWasAppliedTo(slot, index, id) && appliedModelOf(slot) === want) return;
     if (pawn.ref.setModel(want)) noteAppliedModel(slot, want, index, id);
   }, { slot });
 }
