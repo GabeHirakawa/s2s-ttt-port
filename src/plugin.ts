@@ -43,7 +43,10 @@ import { Entity, type EntityRef } from "@s2script/sdk/entity";
 import { items } from "@s2script/cs2";
 import { tell, tellAll, pawnOf } from "./cs2/pawn";
 import { resetBuyMenu, tickBuyMenu } from "./cs2/buymenu";
-import { queueSlays, serveRoundStart, resetSanctions } from "./rdm/sanctions";
+import { queueSlays, serveRoundStart, resetSanctions, recordGuilty, pardon } from "./rdm/sanctions";
+import { captureSay, installRdmFlow, resetRdmFlow, tickRdmFlow } from "./rdm/flow";
+import { Bans } from "@s2script/sdk/bans";
+import { Clients } from "@s2script/sdk/clients";
 import { Admin, ADMFLAG } from "@s2script/sdk/admin";
 import { TttHud, setTttHud, getTttHud } from "./cs2/ttthud";
 import { Server } from "@s2script/sdk/server";
@@ -473,6 +476,7 @@ export function OnPluginStart(): void {
     // "[T] Bob" is cached as Bob's real name.
     teardownWorld(bus, "map");
     resetBuyMenu();
+    resetRdmFlow();
     reg.seedFromEngine();
     // Only clears the one-shot latch — the zones themselves are not spawned yet, so the removal
     // proper waits for `round_start`.
@@ -522,6 +526,9 @@ export function OnPluginStart(): void {
     // ABOVE the early return: pressing B outside a live round must still be answered ("the shop is
     // currently closed") rather than silently doing nothing.
     tickBuyMenu(dt);
+    // ALSO above the early return. A victim is asked about a kill that may have ended the round, so
+    // their prompt has to be able to expire in a state the round is no longer running in.
+    tickRdmFlow();
     if (game.state !== GameState.InProgress) return;
 
     tickInteract(dt);
@@ -561,13 +568,51 @@ export function OnPluginStart(): void {
   // A Guilty verdict queues slays rather than killing now: the accused is usually dead or gone by
   // the time an admin rules, and a slay that lands on nobody is the same as no punishment at all.
   ui.onGuilty = (steamId, name, slays, admin) => {
+    // Advance the ladder BEFORE queueing, so the number an admin was shown is the number served and
+    // the NEXT verdict against this person starts one rung higher.
+    const priors = recordGuilty(steamId);
     const total = queueSlays(steamId, name, slays);
-    console.log(`[ttt/rdm] ${admin} queued ${slays} slay(s) for ${name} (${total} owed)`);
+    console.log(
+      `[ttt/rdm] ${admin} queued ${slays} slay(s) for ${name} (${total} owed, offence #${priors})`,
+    );
     tellAll(`[ttt] ${name} was found guilty of RDM — ${total} slay(s) queued.`);
+  };
+  ui.onBan = (steamId, name, admin) => {
+    if (steamId === "") {
+      console.log(`[ttt/rdm] ${admin} tried to ban ${name} but no SteamID was recorded`);
+      return;
+    }
+    // PERMANENT (minutes <= 0) and persisted to bans.json by the SDK. An admin who wants a
+    // temporary ban has the basebans commands; this button exists for the clear-cut case.
+    Bans.add(steamId, 0, `RDM (banned by ${admin})`);
+    // The debt dies with the ban — they are not coming back to serve it, and leaving it queued
+    // would slay whoever the SteamID belonged to if the ban is ever lifted.
+    pardon(steamId);
+    // Kick them if they are still here. A ban that leaves the player on the server until the next
+    // map is a ban nobody watching believes happened.
+    for (const slot of reg.activeSlots()) {
+      if (reg.steamIdOf(slot) !== steamId) continue;
+      Clients.fromSlot(slot)?.kickWithReason(`Banned for RDM by ${admin}`);
+      break;
+    }
+    console.log(`[ttt/rdm] ${admin} BANNED ${name} (${steamId})`);
+    tellAll(`[ttt] ${name} was banned for RDM.`);
   };
 
   registerCommands();
   command.onClientCommand("jointeam", onJoinTeamCommand);
+  installRdmFlow(bus);
+  // The victim's next chat line IS the report reason, so it is intercepted rather than read: a
+  // reason broadcast to the server tells the accused exactly what was said and by whom.
+  // `captureSay` returns false for every message that is not an awaited one, which is nearly all
+  // of them — those fall through untouched.
+  for (const cmd of ["say", "say_team"]) {
+    command.onClientCommand(cmd, (slot, argString) => {
+      // The engine hands `say` its argument quoted; the quotes are not part of what was typed.
+      const text = argString.trim().replace(/^"(.*)"$/s, "$1");
+      return captureSay(slot, text) ? HookResult.Handled : HookResult.Continue;
+    });
+  }
 
   console.log("[ttt] loaded — Trouble in Terrorist Town");
 
@@ -614,5 +659,8 @@ function serveQueuedSlays(): void {
     // sanctions for a round that is already over.
     if (game.state !== GameState.InProgress && game.state !== GameState.Countdown) break;
     tell(s.slot, `[ttt] Slain for RDM.${s.remaining > 0 ? ` ${s.remaining} slay(s) remaining.` : ""}`);
+    // Say WHY they had no role this round. Being killed at the buzzer with no explanation reads as
+    // a bug, and the exclusion from role selection is the half nobody can see.
+    tell(s.slot, msg("RDM_SANCTION_BENCHED"));
   }
 }

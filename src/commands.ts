@@ -13,6 +13,7 @@
 import { command } from "@s2script/sdk/commands";
 import { steamIdOf } from "./core/registry";
 import { file as fileReport, FileResult, REPORTS_PER_ROUND, pending as pendingReports } from "./rdm/reports";
+import { answerPending } from "./rdm/flow";
 import type { CommandInvocation } from "@s2script/sdk/commands";
 import { ADMFLAG, Admin } from "@s2script/sdk/admin";
 import { ChatColors } from "@s2script/cs2";
@@ -321,6 +322,20 @@ export function registerCommands(): void {
       cmd.reply(msgFor(cmd.callerSlot, "LOGS_VIEWED_INFO"));
     }
     printLogsTo(slot);
+  });
+
+  // Fallbacks for the yes/no prompt, for anyone who closed the menu or plays with menus off.
+  // The menu is the primary path; these exist so a missed keypress does not lose the report.
+  command("sm_rdmyes", (cmd) => {
+    const slot = cmd.callerSlot;
+    if (slot < 0) { cmd.reply(msgFor(slot, "GENERIC_PLAYER_ONLY")); return; }
+    if (!answerPending(slot, true)) cmd.reply(msgFor(slot, "RDM_ASK_EXPIRED"));
+  });
+
+  command("sm_rdmno", (cmd) => {
+    const slot = cmd.callerSlot;
+    if (slot < 0) { cmd.reply(msgFor(slot, "GENERIC_PLAYER_ONLY")); return; }
+    if (!answerPending(slot, false)) cmd.reply(msgFor(slot, "RDM_ASK_EXPIRED"));
   });
 
   command("sm_karma", (cmd) => {

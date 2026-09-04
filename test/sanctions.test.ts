@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   queueSlays, owedBy, serveRoundStart, pardon, allOwed, resetSanctions, MAX_QUEUED,
+  nextSlays, recordGuilty, guiltyCount,
 } from "../src/rdm/sanctions.ts";
 
 const alwaysLands = (): boolean => true;
@@ -76,4 +77,43 @@ test("a map reset drops every queue", () => {
   queueSlays("STEAM_B", "Bo", 1);
   resetSanctions();
   assert.equal(allOwed().length, 0);
+});
+
+test("the escalation ladder climbs per guilty verdict, not per slay served", () => {
+  resetSanctions();
+  const id = "76561198000000001";
+  assert.equal(nextSlays(id), 2, "a first offence is the base");
+  recordGuilty(id);
+  assert.equal(nextSlays(id), 4);
+  recordGuilty(id);
+  assert.equal(nextSlays(id), 6);
+});
+
+test("serving the debt does NOT reset the ladder", () => {
+  resetSanctions();
+  const id = "76561198000000002";
+  recordGuilty(id);
+  queueSlays(id, "Repeat", nextSlays(id));
+  // Pay it off entirely.
+  serveRoundStart([{ slot: 0, steamId: id }], () => true);
+  serveRoundStart([{ slot: 0, steamId: id }], () => true);
+  serveRoundStart([{ slot: 0, steamId: id }], () => true);
+  serveRoundStart([{ slot: 0, steamId: id }], () => true);
+  assert.equal(owedBy(id), 0, "debt cleared");
+  assert.equal(nextSlays(id), 4, "but the NEXT offence still starts one rung up");
+});
+
+test("the ladder is capped so it cannot exceed the queue cap", () => {
+  resetSanctions();
+  const id = "76561198000000003";
+  for (let i = 0; i < 20; i++) recordGuilty(id);
+  assert.ok(nextSlays(id) <= MAX_QUEUED);
+});
+
+test("resetSanctions clears the ladder too", () => {
+  const id = "76561198000000004";
+  recordGuilty(id);
+  resetSanctions();
+  assert.equal(guiltyCount(id), 0);
+  assert.equal(nextSlays(id), 2);
 });

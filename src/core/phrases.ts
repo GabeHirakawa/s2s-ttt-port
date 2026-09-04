@@ -63,6 +63,23 @@ export const PHRASES: Readonly<Record<string, string>> = {
   GAME_LOGS_FOOTER: "-------------------------------",
   GAME_LOGS_NONE: "%PREFIX%There is no game active.",
   LOGS_VIEWED_ALIVE: "%PREFIX%{red}{1}{grey} viewed the logs while alive.",
+
+  // --- RDM: the victim prompt, the report, the admin notice ------------------
+  // A suspicious kill asks the VICTIM a question rather than accusing anyone. The wording matters:
+  // "was this RDM?" invites a reflex yes, so both options state what they mean in full.
+  RDM_ASK_TITLE: "Were you RDM'd by {1}?",
+  RDM_ASK_YES: "Yes - this was RDM",
+  RDM_ASK_NO: "No - that was a good kill",
+  RDM_ASK_CONTEXT: "%PREFIX%{grey}Type in chat what {yellow}{1}{grey} did. Your next message is sent to the admins (or type {yellow}cancel{grey}).",
+  RDM_ASK_DISMISSED: "%PREFIX%{grey}No report filed.",
+  RDM_ASK_EXPIRED: "%PREFIX%{grey}Report timed out - nothing was sent.",
+  RDM_FILE_OK: "%PREFIX%{green}Report filed against {yellow}{1}{green}. An admin will review it.",
+  RDM_FILE_DUPLICATE: "%PREFIX%{grey}You already have a pending report against {1}.",
+  RDM_FILE_RATE_LIMITED: "%PREFIX%{grey}Report limit reached ({1} per round).",
+  RDM_FILE_FAILED: "%PREFIX%{red}That report could not be filed.",
+  RDM_ADMIN_NEW: "%PREFIX%{yellow}New RDM report: {red}{1}{yellow} vs {red}{2}{yellow} - {grey}!rdm{yellow} to review.",
+  RDM_SANCTION_BENCHED: "%PREFIX%{grey}You are serving an RDM slay this round and were not given a role.",
+  RDM_BAN_CONFIRM: "%PREFIX%{red}Press Ban again to confirm banning {1}.",
   LOGS_VIEWED_INFO: "%PREFIX%Logs printed to console. All players' roles have been shown.",
 
   // ── CS2 layer ─────────────────────────────────────────────────────────────

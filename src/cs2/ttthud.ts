@@ -19,7 +19,8 @@ import {
   allItems, balanceOf, canPurchase, tryPurchase, resultMessage, PurchaseResult,
 } from "../shop/shop";
 import type { ShopItem } from "../shop/shop";
-import { pending, rule, ago, Verdict } from "../rdm/reports";
+import { pending, rule, ago, Verdict, type RdmReport } from "../rdm/reports";
+import { BASE_SLAYS, MAX_QUEUED, guiltyCount, nextSlays } from "../rdm/sanctions";
 import { msg, msgFor } from "../core/msgs";
 
 /**
@@ -58,8 +59,16 @@ export class TttHud {
   private rdm: Modal | null = null;
   private logs: Modal | null = null;
   private readonly badge: Badge | null;
-  /** Per-admin slay count, held while the RDM modal is open. */
-  private readonly slays = new Map<number, number>();
+  /**
+   * Per-admin slay count, ONLY when the admin has overridden the escalated default.
+   *
+   * Absent means "use the ladder" — see {@link slaysFor}. Storing the default eagerly would freeze
+   * whatever the ladder said at the moment the sheet opened, so a report selected later showed the
+   * previous accused's figure.
+   */
+  private readonly slayOverride = new Map<number, number>();
+  /** Admin slot -> report id whose Ban button is armed and awaiting the confirming second press. */
+  private readonly banArmed = new Map<number, number>();
   /** Last buy per slot, in game time — see {@link buySelected}. */
   private readonly lastBuyAt = new Map<number, number>();
 
@@ -72,6 +81,8 @@ export class TttHud {
 
   /** Fired when an admin rules Guilty. Sanctioning lives in the plugin, not the UI. */
   onGuilty: ((steamId: string, name: string, slays: number, admin: string) => void) | null = null;
+  /** Fired when an admin confirms a ban. Banning lives in the plugin, not the UI. */
+  onBan: ((steamId: string, name: string, admin: string) => void) | null = null;
 
   constructor(
     private readonly log: (s: string) => void,
@@ -126,13 +137,20 @@ export class TttHud {
       pageSize: RDM_PAGE,
       width: "lg",
       rows: () => this.rdmRows(),
+      // Moving the cursor drops BOTH pieces of per-report scratch. A slay count typed for one
+      // report must not silently carry onto the next, and an armed ban absolutely must not — that
+      // is how the wrong person gets banned by a second click that meant something else.
+      onPick: (slot) => { this.slayOverride.delete(slot); this.banArmed.delete(slot); this.rdm?.refresh(slot); },
       detail: (slot, row, cursor) => this.rdmDetail(slot, cursor),
-      buttons: [
-        { text: "Close", variant: "ghost", onClick: (slot) => this.closeRdm(slot) },
-        { text: "− slay", variant: "ghost", onClick: (slot) => this.stepSlays(slot, -1) },
-        { text: "+ slay", variant: "ghost", onClick: (slot) => this.stepSlays(slot, +1) },
-        { text: "Not guilty", variant: "good", onClick: (slot) => this.verdict(slot, Verdict.Innocent) },
-        { text: "Guilty", variant: "bad", onClick: (slot) => this.verdict(slot, Verdict.Guilty) },
+      // FIVE is the hard ceiling, and paging claims the trailing two — so the two ± steppers this
+      // used to carry could not coexist with a Ban button. Cycling one button through the ladder
+      // costs a click at worst and reads better than a pair of arrows either way.
+      buttons: (slot) => [
+        { text: "Close", variant: "ghost" as const, onClick: (s: number) => this.closeRdm(s) },
+        { text: `Slays: ${this.slaysFor(slot)}`, variant: "ghost" as const, onClick: (s: number) => this.cycleSlays(s) },
+        { text: "Acquit", variant: "good" as const, onClick: (s: number) => this.verdict(s, Verdict.Innocent) },
+        { text: "Convict", variant: "bad" as const, onClick: (s: number) => this.verdict(s, Verdict.Guilty) },
+        { text: this.banArmedFor(slot) ? "Confirm ban" : "Ban", variant: "bad" as const, onClick: (s: number) => this.banStep(s) },
       ],
     };
 
@@ -324,12 +342,16 @@ export class TttHud {
   openRdm(slot: number): void {
     const rdm = this.claimRdm();
     if (rdm === null) return;
-    this.slays.set(slot, 1);
+    // No seeded count: `slaysFor` reads the ladder for whichever report the cursor lands on.
+    this.slayOverride.delete(slot);
+    this.banArmed.delete(slot);
     rdm.open(slot);
   }
 
   closeRdm(slot: number): void {
-    this.slays.delete(slot);
+    this.slayOverride.delete(slot);
+    // An armed ban NEVER survives the sheet closing — reopening it must not fire on one press.
+    this.banArmed.delete(slot);
     this.rdm?.close(slot);
   }
 
@@ -344,22 +366,90 @@ export class TttHud {
 
   private rdmDetail(slot: number, cursor: number): string[] {
     const sel = pending()[cursor];
-    const n = this.slays.get(slot) ?? 1;
     if (!sel) return ["", "", "", "select a report"];
+    const n = this.slaysFor(slot);
+    const priors = guiltyCount(sel.accusedSteamId);
     return [
       `${sel.reporterName} reported ${sel.accusedName}`,
       `round ${sel.round} · ${ago(sel.filed, Date.now() / 1000)}`,
-      `verdict will apply ${n} slay${n === 1 ? "" : "s"}`,
+      `Convict applies ${n} slay${n === 1 ? "" : "s"}` +
+        (priors > 0 ? ` · ${priors} prior guilty verdict${priors === 1 ? "" : "s"} this map` : ""),
       // Last line is the library's clamped box. Already escaped and length-capped by the report
       // store — a reason is the one string here a player controls.
       sel.reason,
     ];
   }
 
-  private stepSlays(slot: number, delta: number): void {
+  /** The report the admin's cursor is on, or undefined. */
+  private selected(slot: number): RdmReport | undefined {
+    if (!this.rdm?.isOpen(slot)) return undefined;
+    return pending()[this.rdm.cursor(slot)];
+  }
+
+  /**
+   * Slays the next Convict will carry: the admin's override if they set one, otherwise the
+   * escalation ladder for THIS accused — 2 for a first offence, 4 for a second, and so on.
+   *
+   * Reading the ladder live (rather than seeding a value when the sheet opens) is what makes the
+   * figure follow the cursor, so an admin working a queue sees each person's own history.
+   */
+  private slaysFor(slot: number): number {
+    const override = this.slayOverride.get(slot);
+    if (override !== undefined) return override;
+    const sel = this.selected(slot);
+    return sel ? nextSlays(sel.accusedSteamId) : BASE_SLAYS;
+  }
+
+  /** Cycle the slay count through the ladder and wrap. One button, because the footer holds five. */
+  private cycleSlays(slot: number): void {
     if (!this.rdm?.isOpen(slot)) return;
-    this.slays.set(slot, Math.max(0, Math.min(10, (this.slays.get(slot) ?? 1) + delta)));
+    const next = this.slaysFor(slot) + BASE_SLAYS;
+    this.slayOverride.set(slot, next > MAX_QUEUED ? BASE_SLAYS : next);
     this.rdm.refresh(slot);
+  }
+
+  private banArmedFor(slot: number): boolean {
+    const armed = this.banArmed.get(slot);
+    return armed !== undefined && armed === this.selected(slot)?.id;
+  }
+
+  /**
+   * Ban, in two presses.
+   *
+   * A ban is the one action on this sheet that cannot be walked back by the next admin, and the
+   * button sits beside Convict on a list whose rows move as reports are ruled. So the first press
+   * only ARMS it — against a specific report id, so that arming a ban and then moving the cursor
+   * cannot fire at whoever landed under it.
+   */
+  private banStep(slot: number): void {
+    const sel = this.selected(slot);
+    if (!sel) return;
+    if (!this.banArmedFor(slot)) {
+      this.banArmed.set(slot, sel.id);
+      this.ui.toast(slot, {
+        title: "Confirm ban",
+        message: `Press Ban again to ban ${sel.accusedName}`,
+        variant: "warn",
+        holdSeconds: 6,
+      });
+      this.rdm?.refresh(slot);
+      return;
+    }
+    this.banArmed.delete(slot);
+    const admin = Player.fromSlot(slot)?.playerName ?? `slot ${slot}`;
+    // Ruled Guilty with ZERO slays: a banned player is not coming back to serve them, and leaving
+    // the report Pending would keep it in every other admin's queue forever.
+    const ruled = rule(sel.id, Verdict.Guilty, 0, admin);
+    this.onBan?.(sel.accusedSteamId, sel.accusedName, admin);
+    this.ui.toast(slot, {
+      title: "Banned",
+      message: sel.accusedName,
+      variant: "bad",
+      holdSeconds: 5,
+    });
+    this.log(`rdm #${sel.id}: ${sel.accusedName} BANNED by ${admin}` + (ruled ? "" : " (report already ruled)"));
+    this.rdm?.select(slot, 0);
+    this.refreshRdm();
   }
 
   private verdict(slot: number, v: Verdict): void {
@@ -367,8 +457,11 @@ export class TttHud {
     const report = pending()[this.rdm.cursor(slot)];
     if (!report) return;
     const admin = Player.fromSlot(slot)?.playerName ?? `slot ${slot}`;
-    const ruled = rule(report.id, v, this.slays.get(slot) ?? 1, admin);
+    const ruled = rule(report.id, v, this.slaysFor(slot), admin);
     if (!ruled) return;
+    // The scratch belonged to the report just ruled; the next one gets its own ladder reading.
+    this.slayOverride.delete(slot);
+    this.banArmed.delete(slot);
 
     if (v === Verdict.Guilty) {
       this.onGuilty?.(ruled.accusedSteamId, ruled.accusedName, ruled.slays, admin);
@@ -407,11 +500,13 @@ export class TttHud {
     for (let slot = 0; slot < MAX_SLOTS; slot++) {
       if (Player.fromSlot(slot)) this.ui.hideAll(slot);
     }
-    this.slays.clear();
+    this.slayOverride.clear();
+    this.banArmed.clear();
   }
 
   forget(slot: number): void {
-    this.slays.delete(slot);
+    this.slayOverride.delete(slot);
+    this.banArmed.delete(slot);
     this.lastBuyAt.delete(slot);
     this.shop?.forget(slot);
     this.rdm?.forget(slot);

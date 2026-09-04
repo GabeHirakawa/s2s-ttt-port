@@ -25,6 +25,38 @@ const names = new Map<string, string>();
 /** Cap per person. A misclick on the stepper should not exile someone for the map. */
 export const MAX_QUEUED = 10;
 
+/** Slays for a FIRST guilty verdict. Each later one adds another {@link BASE_SLAYS}. */
+export const BASE_SLAYS = 2;
+
+/**
+ * Guilty verdicts per SteamID this map — the escalation ladder.
+ *
+ * Separate from {@link owed} because they answer different questions: `owed` is the debt still to
+ * serve and shrinks as it is paid, while this only ever grows. Deriving the escalation from the
+ * debt would mean a repeat offender who had already served their slays came back to the ladder's
+ * bottom rung — which is exactly the person it should not.
+ */
+const guilty = new Map<string, number>();
+
+/** How many slays the NEXT guilty verdict should carry: 2, then 4, then 6… */
+export function nextSlays(steamId: string): number {
+  const priors = guilty.get(steamId) ?? 0;
+  return Math.min(MAX_QUEUED, BASE_SLAYS * (priors + 1));
+}
+
+/** Record a guilty verdict, advancing the ladder. Returns the new count of priors. */
+export function recordGuilty(steamId: string): number {
+  if (steamId === "") return 0;
+  const next = (guilty.get(steamId) ?? 0) + 1;
+  guilty.set(steamId, next);
+  return next;
+}
+
+/** How many times this person has been found guilty on this map. */
+export function guiltyCount(steamId: string): number {
+  return guilty.get(steamId) ?? 0;
+}
+
 /** Queue `count` slays. Returns the new total owed. */
 export function queueSlays(steamId: string, name: string, count: number): number {
   if (steamId === "" || count <= 0) return owed.get(steamId) ?? 0;
@@ -87,4 +119,5 @@ export function serveRoundStart(
 export function resetSanctions(): void {
   owed.clear();
   names.clear();
+  guilty.clear();
 }
