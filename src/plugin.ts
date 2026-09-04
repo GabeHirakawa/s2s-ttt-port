@@ -75,7 +75,7 @@ import {
 } from "./cs2/combat";
 import { precacheBodyModels } from "./cs2/bodies";
 import { initInteract, inspectIdentify, tickInteract } from "./cs2/interact";
-import { unspoofAlive,reassertSpoof, tickSpoof } from "./cs2/spoof";
+import { unspoofAlive, reassertSpoof, tickSpoof } from "./cs2/spoof";
 import { installFeedback } from "./cs2/feedback";
 import { wouldRefuseTeam } from "./game/teams";
 import { installIcons, precacheRoleModels } from "./cs2/icons";
