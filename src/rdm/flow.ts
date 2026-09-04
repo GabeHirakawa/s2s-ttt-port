@@ -12,8 +12,6 @@
  * returns "not mine" for every other message on the server — see {@link captureSay}.
  */
 
-import { Menu, MenuStyle } from "@s2script/sdk/menu";
-import { ChatColors } from "@s2script/cs2";
 import { ADMFLAG, Admin } from "@s2script/sdk/admin";
 import { RoleId } from "../core/enums";
 import * as reg from "../core/registry";
@@ -39,30 +37,25 @@ function isAdmin(slot: number): boolean {
 }
 
 /**
- * Ask the victim whether they were RDM'd.
+ * Ask the victim whether they were RDM'd — PLAIN CHAT, deliberately not a `Menu`.
  *
- * `MenuStyle.Chat` on purpose. The centre/HUD backends draw through the pooled modal sheets, and
- * there are only two of those for the WHOLE server — already spoken for by the shop, the admin RDM
- * manager and the round log. A prompt that silently failed to appear because a sheet was busy would
- * lose the report, so this takes the backend that always renders.
+ * This used `Menu` with `MenuStyle.Chat` on the reasoning that the chat backend always renders.
+ * That reasoning was wrong, and the way it was wrong is worth keeping written down.
+ *
+ * `games/cs2/js/menuhud.js` registers its HUD renderer for BOTH `MenuStyle.Center` AND
+ * `MenuStyle.Chat`, so asking for the chat style does not get you chat — it gets a pooled Panorama
+ * sheet. And that renderer claims its sheet through the MODULE-LEVEL `hudkit`, which resolves via
+ * `hostKit()` during prelude evaluation, outside the load window, with a stand-in registrar. Panels
+ * claimed that way PAINT but can never receive a click. The result on a live server: the question
+ * appeared, captured the cursor, accepted nothing, and could not be dismissed.
+ *
+ * Chat has no such failure mode, needs no workshop addon, and works for a dead player — which every
+ * recipient of this question is. The two commands are registered in `commands.ts`.
  */
 function askVictim(victim: number, subject: Subject): void {
-  const m = new Menu(msgFor(victim, "RDM_ASK_TITLE", subject.accusedName));
-  m.style = MenuStyle.Chat;
-  m.addItem("yes", `${ChatColors.Red}${msgFor(victim, "RDM_ASK_YES")}`);
-  m.addItem("no", `${ChatColors.Green}${msgFor(victim, "RDM_ASK_NO")}`);
-  m.onSelect((e) => {
-    if (e.info === "yes") {
-      if (!acceptOffer(e.slot, Date.now() / 1000)) return;   // lapsed while the menu sat open
-      tell(e.slot, msgFor(e.slot, "RDM_ASK_CONTEXT", subject.accusedName));
-      return;
-    }
-    decline(e.slot);
-    tell(e.slot, msgFor(e.slot, "RDM_ASK_DISMISSED"));
-  });
-  // A menu the player closes without choosing is NOT a "no": leaving the offer alive lets them
-  // still answer with `!rdmyes` before it expires, and the sweep cleans it up either way.
-  m.display(victim, 30);
+  tell(victim, msgFor(victim, "RDM_ASK_TITLE", subject.accusedName));
+  tell(victim, msgFor(victim, "RDM_ASK_YES"));
+  tell(victim, msgFor(victim, "RDM_ASK_NO"));
 }
 
 /**
