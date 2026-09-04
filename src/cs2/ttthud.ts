@@ -22,6 +22,16 @@ import type { ShopItem } from "../shop/shop";
 import { pending, rule, ago, Verdict } from "../rdm/reports";
 import { msg, msgFor } from "../core/msgs";
 
+/**
+ * A {@link Row} plus its tone.
+ *
+ * `Row.tone` lands in `@s2script/cs2` with s2script#166; until this plugin's SDK pin picks that up
+ * the field exists at RUNTIME (the hudkit reads `row.tone` and sets `s2-li-good|warn|bad`) but not
+ * yet in the published type. Declaring it here keeps the plugin building against either version.
+ * Delete the alias and use `Row` directly once the dependency is bumped.
+ */
+export type LogRow = Row & { readonly tone?: "good" | "warn" | "bad" };
+
 const RDM_PAGE = 6;
 /** Log lines per page. The sheet is `xl`, so it can carry more rows than the shop. */
 const LOG_PAGE = 8;
@@ -58,7 +68,7 @@ export class TttHud {
   private readonly rdmSpec: ModalSpec;
   private readonly logsSpec: ModalSpec;
   /** The round log as rows, rebuilt on each open. */
-  private logRows: Row[] = [];
+  private logRows: LogRow[] = [];
 
   /** Fired when an admin rules Guilty. Sanctioning lives in the plugin, not the UI. */
   onGuilty: ((steamId: string, name: string, slays: number, admin: string) => void) | null = null;
@@ -289,12 +299,14 @@ export class TttHud {
    * Show the round log as a sheet. False when there is no HUD, so the caller can fall back to the
    * console dump that this replaced.
    */
-  openLogs(slot: number, lines: readonly string[]): boolean {
+  openLogs(slot: number, lines: readonly LogRow[]): boolean {
     const why = this.ui.ensure();
     if (why !== null) return false;
     const modal = this.claimLogs();
     if (modal === null) return false;
-    this.logRows = lines.map((line) => ({ a: line }));
+    // Rows arrive already toned: the logger decides what counts as a bad action, because that is a
+    // rule of the mode and not a property of the sheet.
+    this.logRows = lines.slice();
     this.ui.hideAll(slot);
     modal.open(slot);
     modal.select(slot, 0);
