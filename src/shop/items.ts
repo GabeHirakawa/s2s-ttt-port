@@ -226,11 +226,10 @@ export function registerItems(): void {
 
   register(
     item("tripwire", "SHOP_ITEM_TRIPWIRE", "SHOP_ITEM_TRIPWIRE_DESC", RoleId.Traitor, "sm_ttt_shop_tripwire_price", (slot) => {
-      // Returns false so `tryPurchase` refunds: refusing the placement AND keeping the credits is
-      // the worst of both, and "too far away" is a miss, not a purchase.
-      if (fx.placeTripwire(slot)) return true;
-      tell(slot, msgFor(slot, "SHOP_ITEM_TRIPWIRE_TOOFAR"));
-      return false;
+      // Buying arms a charge; the next USE press places it. Purchase can no longer fail, so the
+      // refund-on-miss dance is gone with it — you are no longer forced to be standing in the right
+      // doorway with the shop open to spend your credits.
+      tell(slot, msgFor(slot, "SHOP_ITEM_TRIPWIRE_ARMED", fx.grantTripwire(slot)));
     }),
   );
 }

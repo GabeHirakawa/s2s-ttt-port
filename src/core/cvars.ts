@@ -45,6 +45,12 @@ const SPECS: readonly Spec[] = [
   S("sm_ttt_round_duration_per_player", "int", 15, "Extra round seconds per player", 0, 60),
   S("sm_ttt_round_duration_max", "int", 300, "Maximum round duration in seconds", 60, 600),
   S("sm_ttt_time_between_rounds", "int", 1, "Time to wait between rounds in seconds", 1, 60),
+  // The post-round free-roam window, matching CS's own round-end behaviour: the round ends,
+  // everyone keeps moving for a few seconds, then the engine restarts and respawns them at
+  // their spawn points. `mp_round_restart_delay` is what the ENGINE uses for that, so TTT keeps
+  // the two in step rather than running a second, competing clock. 5 matches the SourceMod TTT
+  // reference (`mp_match_restart_delay 5`).
+  S("sm_ttt_post_round_seconds", "int", 5, "Seconds of free roam after a round ends, before the respawn", 1, 30),
   // ── roles ───────────────────────────────────────────────────────────────────
   S("sm_ttt_rolehp_traitor", "int", 100, "Traitor starting health", 1, 1000),
   S("sm_ttt_rolehp_detective", "int", 100, "Detective starting health", 1, 1000),
@@ -391,6 +397,7 @@ export const cfg = {
   countdownSeconds: 15,
   minPlayers: 2,
   timeBetweenRounds: 1,
+  postRoundSeconds: 5,
   roundBase: 60,
   roundPerPlayer: 15,
   roundMax: 300,
@@ -428,6 +435,7 @@ function rebuild(): void {
   cfg.countdownSeconds = n("sm_ttt_round_countdown");
   cfg.minPlayers = n("sm_ttt_minimum_players");
   cfg.timeBetweenRounds = n("sm_ttt_time_between_rounds");
+  cfg.postRoundSeconds = n("sm_ttt_post_round_seconds");
   cfg.roundBase = n("sm_ttt_round_duration_base");
   cfg.roundPerPlayer = n("sm_ttt_round_duration_per_player");
   cfg.roundMax = n("sm_ttt_round_duration_max");

@@ -53,7 +53,25 @@ const SET = "ttt";
  * Sized past the highest slot any phrase uses; a phrase referencing a higher one would lose it, so
  * that ceiling is asserted rather than trusted.
  */
-const TEMPLATE_ARGS: readonly string[] = ["{1}", "{2}", "{3}", "{4}", "{5}", "{6}", "{7}", "{8}"];
+// Round-trip markers for {@link lookup}.
+//
+// We ask the SDK for the phrase in the player's language but do the argument substitution HERE,
+// because a phrase carries colour tags and grammar tokens the SDK knows nothing about. The way to
+// get the template back is to pass a placeholder per slot and recognise it on the way out.
+//
+// Those placeholders must NOT contain braces. The host strips `{` and `}` from every substituted
+// value so a player named `{red}evil` cannot inject a colour tag into everyone's chat — a guard
+// worth having, and one that silently turned our old `"{1}"` markers into a bare `1`. That is
+// where "Alice identified the body of Bob" became "1 identified the body of 2".
+//
+// U+E000.. is a Private Use Area codepoint: it survives the brace strip, cannot collide with a
+// colour control byte, and will never occur in a real phrase or a player name we care about.
+const ARG_MARK = "\uE000";
+const TEMPLATE_ARGS: readonly string[] = [1, 2, 3, 4, 5, 6, 7, 8].map(
+  (n) => `${ARG_MARK}${String(n)}${ARG_MARK}`,
+);
+/** Turn the markers back into the `{N}` form {@link compile} understands. */
+const RESTORE_MARKS = new RegExp(`${ARG_MARK}(\\d+)${ARG_MARK}`, "g");
 
 /** `{token}` → chat colour control byte. Unknown tokens are left untouched. */
 const COLORS: Readonly<Record<string, string>> = {
@@ -197,7 +215,8 @@ function fixPossessive(text: string): string {
  */
 function lookup(slot: number, key: string): string | undefined {
   const t = Translations.translate(slot, key, ...TEMPLATE_ARGS);
-  return t === key ? undefined : t;
+  if (t === key) return undefined;
+  return t.replace(RESTORE_MARKS, "{$1}");
 }
 
 /**

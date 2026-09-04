@@ -16,6 +16,7 @@ import { Clients } from "@s2script/sdk/clients";
 import { Server } from "@s2script/sdk/server";
 import { RoleId } from "../core/enums";
 import { msg } from "../core/msgs";
+import { getTttHud } from "../cs2/ttthud";
 import * as reg from "../core/registry";
 
 /** How many entries a single round retains. Beyond this the oldest are dropped. */
@@ -216,15 +217,28 @@ export function makeLogs(): string[] {
 export function printLogs(): void {
   const lines = makeLogs();
   const active = reg.activeSlots();
+  const ui = getTttHud();
   for (let i = 0; i < active.length; i++) {
-    const client = Clients.fromSlot(active[i]!);
+    const slot = active[i]!;
+    const client = Clients.fromSlot(slot);
     if (client === null || client.isBot) continue;
+    // Sheet first, console as the fallback — same rule as `!logs`. Only ONE pooled sheet is
+    // available to this plugin at a time, so a player already reading something else keeps it and
+    // gets the console dump instead of having it yanked away at the round end.
+    if (ui !== null && !ui.isShopOpen(slot) && !ui.isRdmOpen(slot) && ui.openLogs(slot, lines)) continue;
     for (let j = 0; j < lines.length; j++) client.print(lines[j]!);
   }
   for (let j = 0; j < lines.length; j++) console.log(lines[j]!);
 }
 
-/** Print the log to a single player's developer console (the `!logs` command). */
+/**
+ * Show the log to one player (the `!logs` command).
+ *
+ * The Panorama sheet first: a round log is a list you page through and re-read, which is exactly
+ * what the developer console is worst at — it interleaves with engine spam, needs a key most
+ * players have never bound, and scrolls away. The console dump remains for the server console and
+ * for anyone without the HUD.
+ */
 export function printLogsTo(slot: number): void {
   const lines = makeLogs();
   const client = slot < 0 ? null : Clients.fromSlot(slot);
@@ -232,6 +246,7 @@ export function printLogsTo(slot: number): void {
     for (let j = 0; j < lines.length; j++) console.log(lines[j]!);
     return;
   }
+  if (getTttHud()?.openLogs(slot, lines) === true) return;
   for (let j = 0; j < lines.length; j++) client.print(lines[j]!);
 }
 

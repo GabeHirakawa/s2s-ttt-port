@@ -24,7 +24,9 @@ import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf } from "./pawn";
 import { bodyByEntity, nearestBody, type Body } from "./bodies";
-import { hasBodyPaint, spendBodyPaint, spendGlove, hasGloves, tryDefuseTripwire } from "../shop/effects";
+import {
+  hasBodyPaint, spendBodyPaint, spendGlove, hasGloves, tryDefuseTripwire, tryPlaceHeldTripwire,
+} from "../shop/effects";
 import { readDna } from "../shop/weaponfx";
 import { inProgress } from "../game/game";
 
@@ -161,8 +163,14 @@ export function tickInteract(dt: number): void {
     if (tryDefuseTripwire(slot, dt)) continue;
 
     // Only act on the rising edge for identification, so holding USE does not re-fire.
-    if (!wasHolding) interactOnce(slot);
-    else if (cfg.propPickup) tryPickup(slot);
+    //
+    // A held tripwire is the LAST thing a press can mean. Identifying a body and defusing a wire
+    // are both irreversible-in-the-moment and both are what the player almost certainly intended;
+    // spending a charge instead would quietly cost them the read. So placement only happens when
+    // the press would otherwise have done nothing at all.
+    if (!wasHolding) {
+      if (!interactOnce(slot)) tryPlaceHeldTripwire(slot);
+    } else if (cfg.propPickup) tryPickup(slot);
   }
 }
 
@@ -182,17 +190,22 @@ function bodyInReach(slot: number): Body | undefined {
 }
 
 /** Resolve what the player is looking at and act on it once. */
-function interactOnce(slot: number): void {
+/** Whether the press did something. False means it is free for a tripwire. */
+function interactOnce(slot: number): boolean {
   // Kept here as well as in `bodyInReach`: with no pawn there is nothing to pick up either, and
   // falling through to `tryPickup` would be a behaviour change rather than a refactor.
-  if (pawnOf(slot) === null) return;
+  if (pawnOf(slot) === null) return false;
 
   const body = bodyInReach(slot);
   if (body !== undefined) {
     identify(slot, body, true);
-    return;
+    return true;
   }
-  if (cfg.propPickup) tryPickup(slot);
+  if (!cfg.propPickup) return false;
+  tryPickup(slot);
+  // `tryPickup` reports through the carry slot rather than a return value; reading it back is what
+  // keeps this a two-line change instead of rethreading every early return in there.
+  return carrying[slot] !== null;
 }
 
 /**

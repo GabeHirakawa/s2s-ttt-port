@@ -91,6 +91,9 @@ export const PHRASES: Readonly<Record<string, string>> = {
     "%SHOP_PREFIX%You are %an% {1}{grey}, you have {yellow}{2}{grey} %CREDITS_NAME%%s%.",
   SHOP_REFUNDED: "Refunded: {1}",
   SHOP_MENU_TITLE: "Shop",
+  SHOP_CONFIRM_TITLE: "Buy {1} for {2}?",
+  SHOP_CONFIRM_YES: "Yes, buy it",
+  SHOP_CONFIRM_NO: "No, go back",
   SHOP_MENU_CLOSED:
     "%SHOP_PREFIX%Shop closed — {yellow}ping{grey} or type {yellow}!shop{grey} to open it again.",
   SHOP_MENU_EXPIRED:
@@ -173,6 +176,10 @@ export const PHRASES: Readonly<Record<string, string>> = {
   SHOP_ITEM_TRIPWIRE: "Tripwire",
   SHOP_ITEM_TRIPWIRE_DESC: "The tripwire will activate once anyone crosses it",
   SHOP_ITEM_TRIPWIRE_TOOFAR: "%PREFIX%You are too far away to place the tripwire.",
+  SHOP_ITEM_TRIPWIRE_ARMED:
+    "%PREFIX%Tripwire ready — press {yellow}E{grey} to place it. You are carrying {yellow}{1}{grey}.",
+  SHOP_ITEM_TRIPWIRE_PLACED: "%PREFIX%Tripwire placed. {yellow}{1}{grey} left.",
+  SHOP_ITEM_TRIPWIRE_PLACED_LAST: "%PREFIX%Tripwire placed. That was your last one.",
   SHOP_ITEM_TRIPWIRE_DEFUSING: "Defusing... ({1}, {2} second%s% left).",
   SHOP_ITEM_TRIPWIRE_DEFUSING_CANCELED: "%PREFIX%You stopped defusing the tripwire.",
 
