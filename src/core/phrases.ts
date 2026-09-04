@@ -78,6 +78,7 @@ export const PHRASES: Readonly<Record<string, string>> = {
   RDM_FILE_RATE_LIMITED: "%PREFIX%{grey}Report limit reached ({1} per round).",
   RDM_FILE_FAILED: "%PREFIX%{red}That report could not be filed.",
   RDM_ADMIN_NEW: "%PREFIX%{yellow}New RDM report: {red}{1}{yellow} vs {red}{2}{yellow} - {grey}!rdm{yellow} to review.",
+  RDM_SANCTION_SERVED: "%PREFIX%{red}{1}{grey} was slain for RDM.",
   RDM_SANCTION_BENCHED: "%PREFIX%{grey}You are serving an RDM slay this round and were not given a role.",
   RDM_BAN_CONFIRM: "%PREFIX%{red}Press Ban again to confirm banning {1}.",
   LOGS_VIEWED_INFO: "%PREFIX%Logs printed to console. All players' roles have been shown.",

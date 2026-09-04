@@ -333,7 +333,7 @@ function beginRound(attempt = 0): void {
   reg.rotateRoles();
   setSpoofingEnabled(true);
   clearBodies(true);
-  clearLog();
+  clearLog(game.roundsThisMap + 1);
   for (let i = 0; i < pool.length; i++) reg.refreshName(pool[i]!);
 
   game.winner = RoleId.None;

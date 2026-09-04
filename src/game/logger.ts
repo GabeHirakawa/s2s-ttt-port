@@ -46,13 +46,70 @@ interface Entry {
   bad: boolean;
 }
 
-const entries: Entry[] = [];
+let entries: Entry[] = [];
 let epochTime = 0;
+/** The round number the live log belongs to, stamped when it is archived. */
+let currentRound = 0;
 
-/** Drop every entry and re-base the clock. Called at round start. */
-export function clearLog(): void {
-  entries.length = 0;
+/** One finished round's log, newest first in {@link history}. */
+interface ArchivedRound {
+  round: number;
+  entries: Entry[];
+}
+
+/**
+ * Finished rounds, newest first.
+ *
+ * Kept because an admin almost never rules on the round they are standing in — a report filed at
+ * the end of round 4 is read during round 5, by which point `clearLog` has already thrown away the
+ * evidence it describes. Retaining a handful of rounds is the difference between a report an admin
+ * can check and one they have to take on faith.
+ */
+const history: ArchivedRound[] = [];
+/** Rounds retained. Enough to cover a report filed a few rounds ago; bounded so it cannot grow. */
+export const HISTORY_ROUNDS = 8;
+
+/**
+ * Archive the finished round and start a fresh log. Called at round start.
+ *
+ * The archive happens HERE rather than at round end because this is the one call that is guaranteed
+ * to run before anything is overwritten — a round can end in several ways, and only the next one
+ * starting is common to all of them.
+ */
+export function clearLog(round = 0): void {
+  if (entries.length > 0) {
+    history.unshift({ round: currentRound, entries });
+    if (history.length > HISTORY_ROUNDS) history.length = HISTORY_ROUNDS;
+  }
+  entries = [];
+  currentRound = round;
   epochTime = Server.gameTime;
+}
+
+/**
+ * How many logs can be browsed: the live round plus everything archived.
+ *
+ * Index 0 is ALWAYS the most recent — the live round while one is running, and the round that just
+ * ended once it has been archived.
+ */
+export function logCount(): number {
+  return (entries.length > 0 ? 1 : 0) + history.length;
+}
+
+/** The entries at browse index `i` (0 = most recent), and the round they belong to. */
+function logAt(i: number): { round: number; entries: Entry[] } {
+  if (entries.length > 0) {
+    if (i <= 0) return { round: currentRound, entries };
+    const h = history[i - 1];
+    return h ? { round: h.round, entries: h.entries } : { round: 0, entries: [] };
+  }
+  const h = history[i];
+  return h ? { round: h.round, entries: h.entries } : { round: 0, entries: [] };
+}
+
+/** The round number shown at browse index `i`, for a subtitle. */
+export function logRoundAt(i: number): number {
+  return logAt(i).round;
 }
 
 /** One-letter role tag, as the C# `Name.First(char.IsAsciiLetter)` produced. */
@@ -219,11 +276,12 @@ function toneOf(e: Entry): LogRow["tone"] {
   return e.kind === Kind.Death ? "bad" : "warn";
 }
 
-/** The log as toned rows, for the Panorama sheet. */
-export function makeLogRows(): LogRow[] {
+/** The log at browse index `at` (0 = most recent) as toned rows, for the Panorama sheet. */
+export function makeLogRows(at = 0): LogRow[] {
+  const src = logAt(at).entries;
   const out: LogRow[] = [];
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i]!;
+  for (let i = 0; i < src.length; i++) {
+    const e = src[i]!;
     out.push({ a: render(e), tone: toneOf(e) });
   }
   return out;
