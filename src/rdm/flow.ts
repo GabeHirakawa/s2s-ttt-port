@@ -72,19 +72,29 @@ function askVictim(victim: number, subject: Subject): void {
  * the round boundary, and a question asked ten seconds later has to carry its own answer with it.
  */
 function considerDeath(victim: number, killer: number): void {
-  if (killer < 0 || killer === victim) return;
-  if (!reg.isConnected(victim) || !reg.isConnected(killer)) return;
+  // Every bail is logged. A prompt that never appears is indistinguishable from a kill that was
+  // judged fine, and the difference between those two is the whole feature — so the decision says
+  // itself out loud rather than being reconstructed from the outside.
+  const why = (reason: string): void => {
+    console.log(`[ttt/rdm] no prompt: victim=${victim} killer=${killer} — ${reason}`);
+  };
+  if (killer < 0 || killer === victim) { why("no killer (world/suicide)"); return; }
+  if (!reg.isConnected(victim) || !reg.isConnected(killer)) { why("someone disconnected"); return; }
   const vRole = reg.roleOf(victim);
   const kRole = reg.roleOf(killer);
-  if (vRole === RoleId.None || kRole === RoleId.None) return;
-  if (vRole === RoleId.Spectator || kRole === RoleId.Spectator) return;
+  if (vRole === RoleId.None || kRole === RoleId.None) { why(`role None (v=${vRole} k=${kRole})`); return; }
+  if (vRole === RoleId.Spectator || kRole === RoleId.Spectator) { why("spectator involved"); return; }
 
+  const selfDefence = didStrikeFirst(victim, killer);
   const klass = classifyKill(
     vRole === RoleId.Traitor,
     kRole === RoleId.Traitor,
-    didStrikeFirst(victim, killer),
+    selfDefence,
   );
-  if (klass === KillClass.Clean) return;
+  if (klass === KillClass.Clean) {
+    why(`clean (vRole=${vRole} kRole=${kRole} victimStruckFirst=${selfDefence})`);
+    return;
+  }
 
   const subject: Subject = {
     accusedSlot: killer,
@@ -93,8 +103,11 @@ function considerDeath(victim: number, killer: number): void {
     round: game.roundsThisMap,
     what: describeKill(klass),
   };
-  if (!offer(victim, subject, Date.now() / 1000)) return;
+  if (!offer(victim, subject, Date.now() / 1000)) { why("offer refused"); return; }
   askVictim(victim, subject);
+  console.log(
+    `[ttt/rdm] prompted slot ${victim} about ${subject.accusedName} (class ${klass})`,
+  );
 }
 
 /**

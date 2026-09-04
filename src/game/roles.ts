@@ -265,6 +265,13 @@ export function revealTraitorBuddies(): void {
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
     if (reg.roleOf(slot) === RoleId.Traitor && reg.isAlive(slot)) traitors.push(slot);
+    // Clear LAST round's badge from everyone, every deal.
+    //
+    // The badge is only ever shown, and the engine has no reason to take it down, so a player who
+    // was a Traitor once kept their teammate list on screen for the rest of the map — naming, to
+    // anyone who could still read it, people who were no longer their teammates. Hiding for the
+    // whole roster here and re-showing below means the panel always describes THIS round.
+    getTttHud()?.hideTraitor(slot);
   }
 
   for (let i = 0; i < traitors.length; i++) {

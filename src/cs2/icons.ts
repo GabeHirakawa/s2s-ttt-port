@@ -68,7 +68,7 @@ import { inProgress } from "../game/game";
 import { roleName } from "../game/roles";
 import { cfg } from "../core/cvars";
 import { ROLE_COLORS, type Rgb } from "./color";
-import { pawnOf, noteAppliedModel, appliedModelOf, appliedModelPawnOf, clearAppliedModels } from "./pawn";
+import { pawnOf, noteAppliedModel, appliedModelOf, modelWasAppliedTo, clearAppliedModels } from "./pawn";
 
 /**
  * Height above the pawn ORIGIN (its feet) that the icon is CENTRED on.
@@ -668,11 +668,13 @@ export function applyRoleModel(slot: number): void {
     // Re-dealt (or the player cut) while the frame drained.
     if (reg.roleOf(slot) !== role) return;
     const index = pawn.ref.index;
-    // Skip only when THIS pawn is already wearing it. Keyed on the pawn, not the player: see
-    // `appliedModelPawn`. A redundant `setModel` re-stages a pawn every client holds, which is
-    // the raciest thing in the mode — worth an explicit test to avoid.
-    if (appliedModelPawnOf(slot) === index && appliedModelOf(slot) === want) return;
-    if (pawn.ref.setModel(want)) noteAppliedModel(slot, want, index);
+    const id = pawn.ref.id;
+    // Skip only when THIS EXACT pawn is already wearing it — index AND liveness id, because the
+    // engine recycles indices and a respawn very often reuses the one it just freed. Comparing the
+    // index alone reported "already dressed" about a brand-new pawn and left the team agent on it,
+    // which is exactly how a revealed Innocent kept showing up in FBI kit.
+    if (modelWasAppliedTo(slot, index, id) && appliedModelOf(slot) === want) return;
+    if (pawn.ref.setModel(want)) noteAppliedModel(slot, want, index, id);
   }, { slot });
 }
 
