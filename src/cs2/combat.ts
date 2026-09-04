@@ -89,7 +89,7 @@ export function invalidatePawnCache(): void {
   pawnToSlot.clear();
 }
 
-function resolveSlot(entityIndex: number): number {
+export function resolveSlot(entityIndex: number): number {
   const hit = pawnToSlot.get(entityIndex);
   if (hit !== undefined) return hit;
   // Cache misses too (-1): most damage inflictors are grenades and world geometry, and re-scanning

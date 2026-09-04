@@ -33,6 +33,7 @@ import * as reg from "../core/registry";
 import { Priority, type EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { pawnOf, setHealth, tell } from "../cs2/pawn";
+import { resolveSlot } from "../cs2/combat";
 import { colorCorpse, ROLE_COLORS, setEntityColor, setPawnAlpha, type Rgb } from "../cs2/color";
 import { restrictToTraitors } from "../cs2/icons";
 import {
@@ -102,6 +103,14 @@ const camouflaged = new Uint8Array(MAX_SLOTS);
 const gloveUses = new Int32Array(MAX_SLOTS);
 /** Remaining Body Paint uses. */
 const paintUses = new Int32Array(MAX_SLOTS);
+/**
+ * Unplaced tripwires, per slot.
+ *
+ * The item used to place on PURCHASE, which meant buying was aiming: you had to be standing in the
+ * right doorway with the shop open. Buying now grants a charge and the next USE press spends it,
+ * so a traitor can stock up somewhere safe and place them where they matter.
+ */
+const tripwireCharges = new Int32Array(MAX_SLOTS);
 /** Active compass mode. */
 const compass = new Uint8Array(MAX_SLOTS);
 
@@ -342,6 +351,37 @@ export function grantBodyPaint(slot: number, uses: number): void { paintUses[slo
 // This file only READS it, through `poisonShotsLeft`.
 /** Turn on a compass. */
 export function grantCompass(slot: number, mode: CompassMode): void { compass[slot] = mode; }
+/** Give this player one more unplaced tripwire, and report the new total. */
+export function grantTripwire(slot: number): number {
+  tripwireCharges[slot] = tripwireCharges[slot]! + 1;
+  return tripwireCharges[slot]!;
+}
+
+/** Unplaced tripwires this player is carrying. */
+export function tripwiresHeld(slot: number): number {
+  return tripwireCharges[slot]!;
+}
+
+/**
+ * Spend one held tripwire at whatever the player is looking at.
+ *
+ * Returns whether the USE press was CONSUMED, which is not the same as whether a wire went up: a
+ * placement refused for distance still consumes the press, because the player aimed at a wall and
+ * deserves to be told why rather than have the press fall through to something else. The charge is
+ * kept in that case — a miss is not a spend.
+ */
+export function tryPlaceHeldTripwire(slot: number): boolean {
+  if (tripwireCharges[slot]! <= 0) return false;
+  if (!placeTripwire(slot)) {
+    tell(slot, msgFor(slot, "SHOP_ITEM_TRIPWIRE_TOOFAR"));
+    return true;
+  }
+  const left = tripwireCharges[slot]! - 1;
+  tripwireCharges[slot] = left;
+  tell(slot, msgFor(slot, left > 0 ? "SHOP_ITEM_TRIPWIRE_PLACED" : "SHOP_ITEM_TRIPWIRE_PLACED_LAST", left));
+  return true;
+}
+
 /** Does this player have Gloves charges left? */
 export function hasGloves(slot: number): boolean { return gloveUses[slot]! > 0; }
 /** Does this player have Body Paint charges left? */
@@ -849,10 +889,46 @@ function distToSegmentSq(
   return cx * cx + cy * cy + cz * cz;
 }
 
+/**
+ * How far past each anchor the break-trace starts and ends.
+ *
+ * The anchor props sit a unit off their surface, which is where `ax`/`bx` already are — a trace
+ * starting exactly at `a` begins inside the near panel and reports IT as the blocker, so the wire
+ * could never see a player at all.
+ */
+const ANCHOR_CLEARANCE = 6;
+
+/**
+ * The slot standing in the beam, or -1.
+ *
+ * This is the C#'s `checkTripwires`: trace the wire and ask what stopped it, rather than measuring
+ * how close anyone is to the line. The difference is OCCLUSION, and it is the whole point. A
+ * capsule test fires for a player behind the doorframe the wire is pinned to, on the far side of a
+ * thin wall it passes through, or crouched under it — none of whom has broken anything. A trace
+ * fires only for whoever is actually in the way, and only for the first of them.
+ */
+function wireBroken(tw: Tripwire): number {
+  const dx = tw.bx - tw.ax, dy = tw.by - tw.ay, dz = tw.bz - tw.az;
+  const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  // A wire shorter than the two clearances has no span left to trace; it cannot be broken.
+  if (len <= ANCHOR_CLEARANCE * 2) return -1;
+  const ux = dx / len, uy = dy / len, uz = dz / len;
+  const from = new Vector(
+    tw.ax + ux * ANCHOR_CLEARANCE, tw.ay + uy * ANCHOR_CLEARANCE, tw.az + uz * ANCHOR_CLEARANCE);
+  const to = new Vector(
+    tw.bx - ux * ANCHOR_CLEARANCE, tw.by - uy * ANCHOR_CLEARANCE, tw.bz - uz * ANCHOR_CLEARANCE);
+
+  const hit = Trace.line(from, to, { mask: TraceMask.ShotFull });
+  if (!hit.didHit || hit.entity === null) return -1;
+  const slot = resolveSlot(hit.entity.index);
+  return slot >= 0 && reg.isAlive(slot) ? slot : -1;
+}
+
 /** Advance tripwire arming, crossing detection and defusing. */
 function tickTripwires(dt: number): void {
   if (tripwires.length === 0) return;
-  const sizeSq = n("sm_ttt_shop_tripwire_size_squared");
+  // `sm_ttt_shop_tripwire_size_squared` is no longer read here: breaking the beam is now a trace,
+  // not a radius. The cvar still governs shooting an anchor and reaching one to defuse.
   const ffTriggers = b("sm_ttt_shop_tripwire_friendlyfire_triggers");
 
   for (let i = tripwires.length - 1; i >= 0; i--) {
@@ -876,26 +952,14 @@ function tickTripwires(dt: number): void {
       continue;
     }
 
-    const active = reg.activeSlots();
-    for (let j = 0; j < active.length; j++) {
-      const slot = active[j]!;
-      if (!reg.isAlive(slot)) continue;
-      const pawn = pawnOf(slot);
-      if (pawn === null) continue;
-      const o = pawn.origin;
-      if (o === null) continue;
+    const tripped = wireBroken(tw);
+    if (tripped < 0) continue;
+    // Checked on whoever BROKE it, exactly as the C# does: a Traitor walking through a friendly
+    // wire simply does not set it off when friendly fire is disabled.
+    if (reg.roleOf(tripped) === RoleId.Traitor && !ffTriggers) continue;
 
-      // Sample at torso height so a wire at knee level still catches a standing player.
-      const d = distToSegmentSq(o.x, o.y, o.z + 36, tw.ax, tw.ay, tw.az, tw.bx, tw.by, tw.bz);
-      if (d > sizeSq) continue;
-
-      const sameTeam = reg.roleOf(slot) === RoleId.Traitor;
-      if (sameTeam && !ffTriggers) continue;
-
-      detonateTripwire(tw);
-      tw.alive = false;
-      break;
-    }
+    detonateTripwire(tw);
+    tw.alive = false;
   }
 }
 
@@ -917,19 +981,21 @@ function detonateTripwire(tw: Tripwire): void {
     if (pawn === null) continue;
     const o = pawn.origin;
     if (o === null) continue;
-    // Measured from the nearest point on the WIRE, not from the anchor it was pinned to.
+    // Measured from the NEARER ANCHOR, not from the nearest point on the wire.
     //
-    // The C# measured from `TripwireInstance.StartPos` — one end — and this ported that faithfully.
-    // It only behaves while wires are short: the falloff is steep (~118 damage at 142u, ~11 by
-    // 300u), so on a wire spanning a doorway the far half of the span barely scratches anyone. It
-    // was measured on a live server — a player standing ON the wire, 142u along it, took 59 and
-    // walked away; a second crossing at 168u took 40. A trap that is lethal at one end and
-    // cosmetic at the other is not a trap.
-    //
-    // Distance to the SEGMENT makes the whole length equally dangerous, which is what the wire looks
-    // like it does and what a player crossing it expects. The same helper already decides whether the
-    // wire was tripped at all, so trip and damage now agree on what "near the wire" means.
-    const dist = Math.sqrt(distToSegmentSq(o.x, o.y, o.z + 36, tw.ax, tw.ay, tw.az, tw.bx, tw.by, tw.bz));
+    // The blast comes from the ends — that is where the charge is mounted — so distance to an
+    // endpoint is what the explosion should fall off from. The C# measures from `StartPos` alone;
+    // taking the nearer of the two is the one deliberate difference, and it exists because the
+    // falloff is steep (~118 damage at 142u, single digits by 300u). Measuring from one fixed end
+    // makes a wire spanning a doorway lethal where it was placed and cosmetic at the far anchor —
+    // measured live: a player 142u along the wire took 59, a second crossing at 168u took 40. Using
+    // the nearer end keeps both anchors dangerous while still being an endpoint measurement.
+    const dax = o.x - tw.ax, day = o.y - tw.ay, daz = o.z + 36 - tw.az;
+    const dbx = o.x - tw.bx, dby = o.y - tw.by, dbz = o.z + 36 - tw.bz;
+    const dist = Math.sqrt(Math.min(
+      dax * dax + day * day + daz * daz,
+      dbx * dbx + dby * dby + dbz * dbz,
+    ));
 
     // Exponential decay (`getDamage`). A hyperbolic curve looks similar at the wire and is wildly
     // wrong past it: at stock power/falloff this is ~223 damage at 100u and single digits by 300u,
@@ -1302,6 +1368,7 @@ export function resetEffects(): void {
   camouflaged.fill(0);
   gloveUses.fill(0);
   paintUses.fill(0);
+  tripwireCharges.fill(0);
   compass.fill(0);
   poisonRemaining.fill(0);
   poisonTimer.fill(0);

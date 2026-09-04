@@ -33,6 +33,11 @@ export const enum PurchaseResult {
 /** A human-readable reason for a refusal. */
 export function resultMessage(r: PurchaseResult): string {
   switch (r) {
+    // Success is not a refusal and has no reason to give. Named explicitly so `default` keeps
+    // meaning "a value nobody accounted for" — without this case it reads as an error, and a
+    // caller that formats every result through here tells a player their purchase failed.
+    case PurchaseResult.Success:
+      return "";
     case PurchaseResult.InsufficientFunds:
       return "You do not have enough funds to complete this purchase";
     case PurchaseResult.NotFound:

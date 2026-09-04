@@ -8,9 +8,9 @@
     "test": "node --experimental-strip-types --test test/*.test.ts"
   },
   "devDependencies": {
-    "@s2script/cs2": "^0.14.0",
+    "@s2script/cs2": "^0.16.1",
     "@s2script/eslint-plugin": "^0.2.0",
-    "@s2script/sdk": "^0.21.0",
+    "@s2script/sdk": "^0.24.0",
     "eslint": "^10.7.0"
   },
   "s2script": {

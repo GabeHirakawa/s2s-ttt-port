@@ -17,7 +17,7 @@
 import { delay } from "@s2script/sdk/timers";
 import { bindRoundEpoch, nextPreFrame } from "../core/preframe";
 import { Server } from "@s2script/sdk/server";
-import { GameRules, RoundEndReason, Teams } from "@s2script/cs2";
+import { Events, GameRules, RoundEndReason, Teams, WinPanelFinalEvent } from "@s2script/cs2";
 import { GameState, MAX_SLOTS, RoleId, Team } from "../core/enums";
 import { cfg, refresh, roundDuration } from "../core/cvars";
 import { msg } from "../core/msgs";
@@ -27,7 +27,9 @@ import type { TttEvents } from "../core/events";
 import { assignRoles, revealTraitorBuddies, roleName, stripRoundWeapons } from "./roles";
 import { clearLog, printLogs } from "./logger";
 import { clearBodies } from "../cs2/bodies";
-import { isPlayingTeam, pawnOf, respawn, restoreFullHealth, setPawnIsAlive, teamOf, tellAll } from "../cs2/pawn";
+import {
+  getHealth, isPlayingTeam, pawnOf, respawn, restoreFullHealth, setPawnIsAlive, teamOf, tellAll,
+} from "../cs2/pawn";
 import { resetTeamsToT, revealAllRoles } from "./teams";
 import { setSpoofingEnabled } from "../cs2/spoof";
 
@@ -200,11 +202,20 @@ export function startGame(quiet = false): void {
   // backing array, and since core #108 the outbound call in this loop runs other plugins'
   // handlers before it returns — one of which can disconnect a player and splice this array
   // mid-walk. That shifts every later element left, silently skipping someone.
+  // Re-read liveness from the ENGINE before deciding who to respawn.
+  //
+  // `reconcileRound` only resyncs while the round is IN_PROGRESS, so nothing refreshes the registry
+  // across Finished -> Waiting -> Countdown. A round that ended because the Traitors wiped the
+  // server leaves the registry holding whatever it last believed, and anyone it wrongly thinks is
+  // alive is skipped here and starts the next round as a corpse. The C# never had this failure mode
+  // because it asks the engine directly (`p.GetHealth() <= 0`), which is what the loop below now
+  // does — the registry is a cache, and a cache is the wrong thing to ask whether someone is dead.
+  reg.resyncAlive();
   const active = reg.activeSlots().slice();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
     if (!reg.isConnected(slot)) continue;
-    if (!reg.isAlive(slot) && isPlayingTeam(slot)) respawn(slot);
+    if (isPlayingTeam(slot) && getHealth(slot) <= 0) respawn(slot);
   }
 
   void delay(cfg.countdownSeconds * 1000).then(() => {
@@ -253,11 +264,15 @@ function beginRound(attempt = 0): void {
   //
   // Copied, not the live array: `activeSlots()` returns the registry's backing array and a nested
   // handler can splice it mid-loop.
+  // Resync BEFORE the loop, not after: deciding from the registry and reconciling afterwards is
+  // backwards, and it is how a stale "alive" survived long enough to skip someone's respawn. The
+  // engine's health is the authority either way — see the same loop in `startGame`.
+  reg.resyncAlive();
   const active = reg.activeSlots().slice();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
     if (!reg.isConnected(slot)) continue;   // a nested handler may have dropped them
-    if (reg.isAlive(slot) || !isPlayingTeam(slot)) continue;
+    if (!isPlayingTeam(slot) || getHealth(slot) > 0) continue;
     respawn(slot);
   }
   reg.resyncAlive();
@@ -468,6 +483,19 @@ export function endGame(winner: RoleId, reason?: string): void {
 
   const endReason =
     winner === RoleId.Traitor ? RoundEndReason.TerroristsWin : RoundEndReason.CTsWin;
+
+  // The end-of-round win panel, fired the moment TTT decides the round — `RoundTimerListener`'s
+  // `endRound` does exactly this with `EventCsWinPanelRound(true)` and `final_event` 2/3. It is
+  // what tells a player the round is OVER rather than merely quiet: without it the free-roam
+  // window below reads as the round still running, and the winner is only ever announced in chat.
+  //
+  // Broadcast, not server-only: the panel is a client-side thing and suppressing it would defeat
+  // the point of firing it.
+  Events.fire("cs_win_panel_round", {
+    final_event:
+      winner === RoleId.Traitor ? WinPanelFinalEvent.TerroristsWin : WinPanelFinalEvent.CTsWin,
+  });
+
   if (winner !== RoleId.None) {
     Teams.addScore(winner === RoleId.Traitor ? Team.Terrorist : Team.CounterTerrorist, 1);
   }

@@ -20,7 +20,7 @@
  * 1. **One frame handler.** The original registered a `RegisterListener<OnTick>` plus several
  *    `AddTimer(...)` and `SchedulePeriodic(...)` subscriptions across `PropMover`, `NameDisplayer`,
  *    `CS2AliveSpoofer`, `PeriodicRewarder`, `RoundTimerListener` and each station/tripwire item.
- *    Everything periodic here runs from the single `ctx.server.onGameFrame` below, each subsystem
+ *    Everything periodic here runs from the single `scope.server.onGameFrame` below, each subsystem
  *    keeping its own accumulator.
  *
  * 2. **Slot-indexed state.** Roles, karma, balances, alive flags and item charges are entries in
@@ -36,8 +36,13 @@
  * damage logging are the other notable departures; each is documented at its own module.
  */
 
-import { plugin } from "@s2script/sdk/plugin";
+import { createScope } from "@s2script/sdk/plugin";
+import { command } from "@s2script/sdk/commands";
+import { SDKHook, SDKHookType } from "@s2script/sdk/sdkhooks";
+import { Entity, type EntityRef } from "@s2script/sdk/entity";
+import { items } from "@s2script/cs2";
 import { tell, tellAll, pawnOf } from "./cs2/pawn";
+import { resetBuyMenu, tickBuyMenu } from "./cs2/buymenu";
 import { queueSlays, serveRoundStart, resetSanctions } from "./rdm/sanctions";
 import { Admin, ADMFLAG } from "@s2script/sdk/admin";
 import { TttHud, setTttHud, getTttHud } from "./cs2/ttthud";
@@ -187,6 +192,12 @@ function applyServerSettings(): void {
   // enough on its own: loading a WORKSHOP map refuses these three by name at cfg-exec time
   // ("DISALLOWED WORKSHOP CONVAR"), so a server that boots straight onto a workshop map never
   // applies them. They ARE settable at runtime, which is what makes asserting them here work.
+  // The CS2 buy menu is client-side Panorama and cannot be replaced from here, so make it INERT
+  // instead: 3 = "nobody can buy". The panel still opens on B — and `cs2/buymenu.ts` turns that
+  // keypress into the TTT shop — but the engine's own list is empty and buys nothing behind ours.
+  // TTT already refuses the grant at `onCanAcquire`; this is what stops the panel looking live.
+  Server.command("sv_buy_status_override 3");
+
   Server.command("sv_parallel_packentities 0");
   Server.command("sv_parallel_sendsnapshot 0");
   Server.command("sv_enable_alternate_baselines 0");
@@ -197,8 +208,17 @@ function applyServerSettings(): void {
   // would fight that.
 }
 
-export default plugin((ctx) => {
-  const bus = new EventBus<TttEvents>();
+/**
+ * Module-scoped so `OnPluginEnd` can tear the same bus down. Everything else this plugin owns
+ * hangs off `OnPluginStart`'s scope, which the ledger clears on unload.
+ */
+const bus = new EventBus<TttEvents>();
+
+export function OnPluginStart(): void {
+  // One scope for every subscription. `Scope` is the only surface that carries the frame PHASE
+  // and the client-lifecycle callbacks together; the SourceMod-shaped publics (`OnGameFrame`,
+  // `OnClientActive`, ...) are one-per-module and cannot express the post-phase paint below.
+  const scope = createScope();
 
   // ── configuration ─────────────────────────────────────────────────────────
   registerCvars();
@@ -283,7 +303,7 @@ export default plugin((ctx) => {
   // initialises their karma.
   syncRosterAndAnnounce();
 
-  ctx.clients.onActive((client) => {
+  scope.clients.onActive((client) => {
     // Panels default VISIBLE in the markup, so collapse them until asked for.
     getTttHud()?.hideAll(client.slot);
     reg.addPlayer(client.slot, client.steamId, client.name);
@@ -305,12 +325,12 @@ export default plugin((ctx) => {
 
   // POST player_death: put the alive flag back after the engine has written its own, in the same
   // frame. The pre-hook cannot do this — the engine's write happens after it. See `reassertSpoof`.
-  ctx.events.on("player_death", (ev) => {
+  scope.events.on("player_death", (ev) => {
     const victim = ev.getPlayerSlot("userid");
     if (victim >= 0) reassertSpoof(victim);
   });
 
-  ctx.clients.onDisconnect((client) => {
+  scope.clients.onDisconnect((client) => {
     getTttHud()?.forget(client.slot);
     bus.emit("leave", { slot: client.slot });
     reg.removePlayer(client.slot);
@@ -318,15 +338,15 @@ export default plugin((ctx) => {
     checkEndConditions();
   });
 
-  ctx.clients.onSay((slot, text): HookResultValue | void => handleChat(slot, text));
+  scope.clients.onSay((slot, text): HookResultValue | void => handleChat(slot, text));
 
   // ── game events ───────────────────────────────────────────────────────────
   // Seed the gadget-kill path with the bus up front: it drives deaths that no engine event announces
   // (see `killWithGadget`), so it cannot wait for the first `player_death` to supply one.
   setDeathBus(bus);
-  ctx.events.onPre("player_death", (ev) => onDeathPre(bus, ev));
+  scope.events.onPre("player_death", (ev) => onDeathPre(bus, ev));
 
-  ctx.events.on("player_spawn", (ev) => {
+  scope.events.on("player_spawn", (ev) => {
     const slot = ev.getPlayerSlot("userid");
     if (slot >= 0) onSpawn(slot);
   });
@@ -336,14 +356,14 @@ export default plugin((ctx) => {
   // change, which the post-event handler below reverses. Splitting it this way means the switch is
   // issued exactly once, while the leak — a dead player's team move announcing their death — never
   // reaches anybody.
-  ctx.events.onPre("player_team", (ev): HookResultValue | void => {
+  scope.events.onPre("player_team", (ev): HookResultValue | void => {
     const slot = ev.getPlayerSlot("userid");
     if (wouldRefuseTeam(slot, ev.getInt("team") as Team, ev.getBool("disconnect"))) {
       return HookResult.Handled;
     }
   });
 
-  ctx.events.on("player_team", (ev) => {
+  scope.events.on("player_team", (ev) => {
     const slot = ev.getPlayerSlot("userid");
     // A leaving player fires `player_team` for team None on the way out; the flag lets the team
     // guard tell that apart from a live player ducking to spectator, which it must undo.
@@ -353,7 +373,7 @@ export default plugin((ctx) => {
     checkEndConditions();
   });
 
-  ctx.events.on("round_start", () => {
+  scope.events.on("round_start", () => {
     // Re-assert the required settings here as well as on map start: the map's own `gamemode_*.cfg`
     // execs AFTER `onMapStart`, so anything set there is overwritten (`mp_warmuptime` in
     // particular, which would otherwise keep the server in a warmup TTT never starts a round from).
@@ -367,25 +387,25 @@ export default plugin((ctx) => {
   });
 
   // Warmup blocks the round start; pick it back up the moment warmup finishes.
-  ctx.events.on("warmup_end", () => {
+  scope.events.on("warmup_end", () => {
     syncRosterAndAnnounce();
     if (game.state === GameState.Waiting) startGame();
   });
 
   // The engine's own round end must not decide a TTT round, but it does restart the round out from
   // under us — so suppress the broadcast AND fold the TTT round up behind it.
-  ctx.events.onPre("round_end", (): HookResultValue | void => {
+  scope.events.onPre("round_end", (): HookResultValue | void => {
     if (game.state !== GameState.InProgress) return;
     onEngineRoundEnd();
     return HookResult.Handled;
   });
 
   // A resolved bomb frees up a C4 slot for the "max at once" purchase gate.
-  ctx.events.on("bomb_exploded", () => releaseC4());
-  ctx.events.on("bomb_defused", () => releaseC4());
+  scope.events.on("bomb_exploded", () => releaseC4());
+  scope.events.on("bomb_defused", () => releaseC4());
 
   // Grenade detonations drive the Poison Smoke and Cluster Grenade items.
-  ctx.events.on("smokegrenade_detonate", (ev) => {
+  scope.events.on("smokegrenade_detonate", (ev) => {
     // The projectile index is what lets the poison cloud die with the smoke that carries it,
     // rather than running out a fixed lifetime the map's own smoke never agreed to.
     onSmokeDetonate(
@@ -396,26 +416,26 @@ export default plugin((ctx) => {
   });
 
   // The poison goes when the cloud does.
-  ctx.events.on("smokegrenade_expired", (ev) => {
+  scope.events.on("smokegrenade_expired", (ev) => {
     onSmokeExpired(ev.getInt("entityid"));
   });
 
-  ctx.events.on("hegrenade_detonate", (ev) => {
+  scope.events.on("hegrenade_detonate", (ev) => {
     onHeDetonate(ev.getPlayerSlot("userid"), ev.getFloat("x"), ev.getFloat("y"), ev.getFloat("z"));
   });
 
   // Poison Shots burns a charge on every pistol trigger pull, hit or miss — the C# spent the charge
   // on FIRE and only READ the counter on damage, so the shot that spends the last one lands clean.
-  ctx.events.on("weapon_fire", (ev) => {
+  scope.events.on("weapon_fire", (ev) => {
     onWeaponFire(ev.getPlayerSlot("userid"), ev.getString("weapon"));
   });
 
   // Placed gadgets are shootable: a bullet pops a tripwire or takes a station's health down.
-  ctx.events.on("bullet_impact", (ev) => {
+  scope.events.on("bullet_impact", (ev) => {
     onBulletImpact(ev.getPlayerSlot("userid"), ev.getFloat("x"), ev.getFloat("y"), ev.getFloat("z"));
   });
 
-  ctx.events.onPre("item_purchase", (ev): HookResultValue | void => {
+  scope.events.onPre("item_purchase", (ev): HookResultValue | void => {
     const slot = ev.getPlayerSlot("userid");
     if (slot < 0) return;
     return onItemPurchase(slot, ev.getString("weapon")) ? HookResult.Handled : undefined;
@@ -423,34 +443,36 @@ export default plugin((ctx) => {
 
   // Prefer refusing the grant at CanAcquire. Nested vote folding is still broken on some hosts,
   // so `item_purchase` above remains the strip fallback.
-  if (ctx.items?.onCanAcquire !== undefined) {
-    ctx.items.onCanAcquire(onCanAcquire);
-  } else {
-    console.log("[ttt] WARN: ctx.items.onCanAcquire unavailable — buy-menu strip stays on item_purchase");
-  }
+  items.onCanAcquire(onCanAcquire);
 
   // A weapon inspect identifies a corpse too, alongside USE — the C# routes both buttons into the
   // one `onStartUse` trace (`PropMover.cs:53`). Driven off the event rather than the button bit
   // because `PlayerButtons.Inspect` is `1 << 35` and will not survive a JS bitwise test; see
   // `inspectIdentify`.
-  ctx.events.on("inspect_weapon", (ev) => inspectIdentify(ev.getPlayerSlot("userid")));
+  scope.events.on("inspect_weapon", (ev) => inspectIdentify(ev.getPlayerSlot("userid")));
 
   // ── entity + damage ───────────────────────────────────────────────────────
-  ctx.entities.onDamage((info) => onDamage(bus, info));
+  // Per-PAWN, not a global mux: the damage hook is an `SDKHook` on each `player` entity now.
+  // Seed the pawns that already exist (a hot reload mid-round), then catch every later one at
+  // CREATE rather than spawn — a pawn is created first, so this cannot miss damage taken in the
+  // spawn frame itself.
+  for (const pawn of Entity.findByClass("player")) hookDamage(pawn);
+  scope.entities.onCreate("player", (entity) => hookDamage(entity));
   // Fallback while the pre-hook does not receive real combat damage — see `onPlayerHurt`.
-  ctx.events.on("player_hurt", (ev) => onPlayerHurt(bus, ev));
+  scope.events.on("player_hurt", (ev) => onPlayerHurt(bus, ev));
 
   // ── map lifecycle ─────────────────────────────────────────────────────────
-  ctx.server.onPrecache((pc) => {
+  scope.server.onPrecache((pc) => {
     precacheBodyModels(pc);
     precacheRoleModels(pc);
     precacheEffectModels(pc);
   });
 
-  ctx.server.onMapStart(() => {
+  scope.server.onMapStart(() => {
     // Hide-then-Kill-then-restore, including name tags. Must run BEFORE `seedFromEngine` or
     // "[T] Bob" is cached as Bob's real name.
     teardownWorld(bus, "map");
+    resetBuyMenu();
     reg.seedFromEngine();
     // Only clears the one-shot latch — the zones themselves are not spawned yet, so the removal
     // proper waits for `round_start`.
@@ -481,9 +503,9 @@ export default plugin((ctx) => {
   //
   // This is what lets the spoof leave the pawn's own `lifeState` alone (see `tickSpoof`): the pawn
   // write was only ever there to win this ordering fight, and it cost dead players their freecam.
-  ctx.server.onGameFrame(() => { tickSpoof(); }, { phase: "post" });
+  scope.server.onGameFrame(() => { tickSpoof(); }, { phase: "post" });
 
-  ctx.server.onGameFrame(() => {
+  scope.server.onGameFrame(() => {
     // FIRST, and before anything reads entity state: run work deferred to "next frame, pre-simulation"
     // (the `Server.NextWorldUpdate` equivalent). This subscription passes no `phase`, and core defaults
     // a subscription to Pre — which is the whole point. See core/preframe.ts.
@@ -497,6 +519,9 @@ export default plugin((ctx) => {
     tickHandlers(dt);
     tickWaiting(dt);
     tickCountdown(dt);
+    // ABOVE the early return: pressing B outside a live round must still be answered ("the shop is
+    // currently closed") rather than silently doing nothing.
+    tickBuyMenu(dt);
     if (game.state !== GameState.InProgress) return;
 
     tickInteract(dt);
@@ -529,7 +554,6 @@ export default plugin((ctx) => {
   // Panorama HUD (traitor badge + clickable shop). Constructed before commands so `!shop` can
   // reach it. Degrades to nothing for players without the workshop addon — see cs2/ttthud.ts.
   const ui = new TttHud(
-    ctx,
     (line) => console.log(`[ttt/ui] ${line}`),
     (slot) => Admin.forSlot(slot)?.hasFlags(ADMFLAG.GENERIC) ?? false,
   );
@@ -542,17 +566,27 @@ export default plugin((ctx) => {
     tellAll(`[ttt] ${name} was found guilty of RDM — ${total} slay(s) queued.`);
   };
 
-  registerCommands(ctx.commands);
-  ctx.commands.onClientCommand("jointeam", onJoinTeamCommand);
+  registerCommands();
+  command.onClientCommand("jointeam", onJoinTeamCommand);
 
   console.log("[ttt] loaded — Trouble in Terrorist Town");
 
-  return {
-    onUnload() {
-      teardownWorld(bus, "unload");
-    },
-  };
-});
+}
+
+/** Best-effort cleanup. The ledger is still the teardown authority; this restores the WORLD. */
+export function OnPluginEnd(): void {
+  teardownWorld(bus, "unload");
+}
+
+/**
+ * Arm the per-entity damage hook on one player pawn.
+ *
+ * `false` back from `SDKHook` means the ref was null or already stale — a pawn that died inside the
+ * same frame it spawned. Nothing to do about it and nothing worth logging per spawn.
+ */
+function hookDamage(pawn: EntityRef | null): void {
+  SDKHook(pawn, SDKHookType.OnTakeDamage, (info) => onDamage(bus, info));
+}
 
 /**
  * Serve one queued RDM slay per sanctioned player, at round start.

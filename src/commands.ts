@@ -10,7 +10,7 @@
  * commands here register directly against it.
  */
 
-import type { CtxCommands } from "@s2script/sdk/plugin";
+import { command } from "@s2script/sdk/commands";
 import { steamIdOf } from "./core/registry";
 import { file as fileReport, FileResult, REPORTS_PER_ROUND, pending as pendingReports } from "./rdm/reports";
 import type { CommandInvocation } from "@s2script/sdk/commands";
@@ -52,6 +52,49 @@ const listBuffer: ShopItem[] = [];
 // Pagination (7 per chat page), the number keys, the Exit control and the timeout all come from the
 // framework too.
 
+/** Try the Panorama shop. False = no HUD available, caller should fall back. */
+function openShopHud(slot: number): boolean {
+  const ui = getTttHud();
+  if (!ui) return false;
+  return ui.openShop(slot);
+}
+
+/**
+ * Dismiss the shop sheet if one is up. Returns true when there was something to close.
+ *
+ * Called BEFORE any round-state or liveness gate, and deliberately so: a player must never be
+ * stuck with a panel they cannot get rid of. Dying with the shop open, or the round ending under
+ * it, would otherwise leave the sheet on screen with the mouse captured and every dismissal path
+ * gated off. `hideAll` rather than just `close` because it also drops any other pooled panel this
+ * player has up and releases the cursor — the middle mouse button is the escape hatch, so it has
+ * to actually clear the screen.
+ */
+function closeShopIfOpen(slot: number): boolean {
+  const ui = getTttHud();
+  if (!ui || !ui.isShopOpen(slot)) return false;
+  ui.closeShop(slot);
+  ui.hideAll(slot);
+  return true;
+}
+
+/**
+ * Open the shop for `slot` — Panorama first, the chat menu second.
+ *
+ * The buy-menu route (`cs2/buymenu.ts`) comes through here rather than through `!shop`, because it
+ * has to answer a keypress that arrives at any moment in the round. Outside a live round it says so
+ * instead of drawing a store whose every row is unbuyable: `canPurchase` already refuses everything
+ * unless `inProgress()`, so an "open" shop there would be a menu that does nothing when clicked.
+ */
+export function openShopFor(slot: number): void {
+  if (slot < 0) return;
+  if (closeShopIfOpen(slot)) return;          // a second press means "put it away"
+  if (game.state !== GameState.InProgress) {
+    tell(slot, msgFor(slot, "SHOP_INACTIVE"));
+    return;
+  }
+  if (!openShopHud(slot)) openShopMenu(slot);
+}
+
 /** Open the shop menu for `slot`. Shared by `!shop`, `!list` and the ping shortcut. */
 function openShopMenu(slot: number): void {
   if (slot < 0) return;
@@ -89,11 +132,48 @@ function openShopMenu(slot: number): void {
     );
   }
 
+  // Picking a row does NOT spend anything — it opens the confirm step below. The Panorama shop has
+  // worked this way since a single physical click was found to reach the server more than once
+  // (one press, two healthshots); this menu is the same shop reached a different way, so it gets
+  // the same protection. A mis-pick now costs a keypress instead of credits.
   m.onSelect((e) => {
     const item = itemById(e.info);
-    if (item === undefined) return;
-    // Re-validated here rather than trusted from display time: credits and liveness can both have
-    // changed between the menu being painted and the number being typed.
+    if (item !== undefined) confirmPurchase(e.slot, item);
+  });
+
+  m.onCancel((e) => {
+    // Only the two closes the PLAYER caused are worth a word. `NewMenu` means they opened something
+    // else and are looking at it — telling them the shop closed would be noise about a thing they
+    // just did on purpose — and `Disconnect` has nobody left to tell.
+    if (e.reason === MenuCancelReason.Exit) tell(e.slot, msgFor(e.slot, "SHOP_MENU_CLOSED"));
+    else if (e.reason === MenuCancelReason.Timeout) tell(e.slot, msgFor(e.slot, "SHOP_MENU_EXPIRED"));
+  });
+
+  m.display(slot, MENU_SECONDS);
+  openMenus[slot] = m;
+}
+
+/**
+ * Second, deliberate press before any credits move.
+ *
+ * Everything is re-validated HERE rather than trusted from display time: the menu was painted at
+ * least one keypress ago, and in that window the player can have been shot, the round can have
+ * ended, and their balance can have moved. Confirming is the only moment whose answer matters.
+ */
+function confirmPurchase(slot: number, item: ShopItem): void {
+  if (game.state !== GameState.InProgress || !reg.isAlive(slot)) {
+    tell(slot, msgFor(slot, "SHOP_INACTIVE"));
+    return;
+  }
+
+  const m = new Menu(msgFor(slot, "SHOP_CONFIRM_TITLE", msgFor(slot, item.nameKey), item.price));
+  m.style = MenuStyle.Chat;   // non-freezing, same as the shop it came from
+  m.addItem("yes", `${ChatColors.Green}${msgFor(slot, "SHOP_CONFIRM_YES")}`);
+  m.addItem("no", `${ChatColors.Grey}${msgFor(slot, "SHOP_CONFIRM_NO")}`);
+
+  m.onSelect((e) => {
+    if (e.info !== "yes") { openShopMenu(e.slot); return; }
+    // Re-checked a second time: this menu was itself open for a keypress.
     if (game.state !== GameState.InProgress || !reg.isAlive(e.slot)) {
       tell(e.slot, msgFor(e.slot, "SHOP_INACTIVE"));
       return;
@@ -106,12 +186,10 @@ function openShopMenu(slot: number): void {
     }
   });
 
+  // Only Exit is worth a word: a timeout on the CONFIRM step means they walked away from a
+  // purchase they never made, and Disconnect has nobody left to tell.
   m.onCancel((e) => {
-    // Only the two closes the PLAYER caused are worth a word. `NewMenu` means they opened something
-    // else and are looking at it — telling them the shop closed would be noise about a thing they
-    // just did on purpose — and `Disconnect` has nobody left to tell.
     if (e.reason === MenuCancelReason.Exit) tell(e.slot, msgFor(e.slot, "SHOP_MENU_CLOSED"));
-    else if (e.reason === MenuCancelReason.Timeout) tell(e.slot, msgFor(e.slot, "SHOP_MENU_EXPIRED"));
   });
 
   m.display(slot, MENU_SECONDS);
@@ -138,19 +216,29 @@ export function resetShopMenus(): void {
   }
 }
 
-/** Open the shop from a middle-mouse ping. */
+/**
+ * Open the shop from a middle-mouse ping.
+ *
+ * Through `openShopFor`, so the ping gets the SAME shop as `!shop` and the buy menu: the Panorama
+ * sheet with credits, per-row detail and select-then-confirm, falling back to the plain `Menu` list
+ * only when there is no HUD to draw on. It used to call `openShopMenu` directly, which meant the
+ * one input a player has spare mid-round silently got the thinner of the two shops.
+ */
 export function onPlayerPing(slot: number): void {
   if (slot < 0 || slot >= MAX_SLOTS) return;
+  // Closing comes first and is never gated — see `closeShopIfOpen`. Only OPENING requires a live
+  // round and a live player.
+  if (closeShopIfOpen(slot)) return;
   if (game.state !== GameState.InProgress || !reg.isAlive(slot)) return;
-  openShopMenu(slot);
+  openShopFor(slot);
 }
 
 /** The version string reported by `!ttt`. */
 const VERSION = "0.1.0";
 
-/** Register every command on the plugin context. */
-export function registerCommands(commands: CtxCommands): void {
-  commands.register("sm_ttt", (cmd) => {
+/** Register every TTT command. */
+export function registerCommands(): void {
+  command("sm_ttt", (cmd) => {
     if (cmd.arg(0).toLowerCase() !== "status") {
       cmd.reply(msgFor(cmd.callerSlot, "CMD_TTT", VERSION));
       return;
@@ -212,7 +300,7 @@ export function registerCommands(commands: CtxCommands): void {
     }
   });
 
-  commands.register("sm_logs", (cmd) => {
+  command("sm_logs", (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Finished) {
       cmd.reply(msgFor(cmd.callerSlot, "GAME_LOGS_NONE"));
       return;
@@ -228,7 +316,7 @@ export function registerCommands(commands: CtxCommands): void {
     printLogsTo(slot);
   });
 
-  commands.register("sm_karma", (cmd) => {
+  command("sm_karma", (cmd) => {
     if (cmd.callerSlot < 0) {
       cmd.reply(msgFor(cmd.callerSlot, "GENERIC_PLAYER_ONLY"));
       return;
@@ -301,7 +389,7 @@ export function registerCommands(commands: CtxCommands): void {
   // Players file; admins adjudicate. Chat stays the transport for the reason because typing detail
   // into a Panorama field is not something the custom HUD gives us — only state crosses the wire.
 
-  commands.register("sm_report", (cmd) => {
+  command("sm_report", (cmd) => {
     const slot = cmd.callerSlot;
     if (slot < 0) { cmd.reply(msgFor(slot, "GENERIC_PLAYER_ONLY")); return; }
     const targetQuery = cmd.arg(0);
@@ -335,14 +423,14 @@ export function registerCommands(commands: CtxCommands): void {
 
   // Spawning the layout entity MUST happen in a command dispatch — doing it from a frame
   // segfaulted a live server at round start. So it is an explicit admin action, not implicit.
-  commands.registerAdmin("sm_ttt_hud", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_ttt_hud", ADMFLAG.GENERIC, (cmd) => {
     const hud = getTttHud();
     if (!hud) { cmd.reply("[ttt] HUD unavailable."); return; }
     const why = hud.ensure();
     cmd.reply(why === null ? "[ttt] HUD layout spawned." : `[ttt] HUD not ready: ${why}`);
   });
 
-  commands.registerAdmin("sm_rdm", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_rdm", ADMFLAG.GENERIC, (cmd) => {
     const slot = cmd.callerSlot;
     const queue = pendingReports();
     if (slot < 0) {
@@ -359,31 +447,23 @@ export function registerCommands(commands: CtxCommands): void {
     hud.openRdm(slot);
   });
 
-  commands.register("sm_balance", balance);
-  commands.register("sm_bal", balance);
-  commands.register("sm_credits", balance);
-  commands.register("sm_points", balance);
+  command("sm_balance", balance);
+  command("sm_bal", balance);
+  command("sm_credits", balance);
+  command("sm_points", balance);
   // !shop — the clickable Panorama shop. Falls back to telling the player how to use the text
   // commands when they have no HUD, rather than appearing to do nothing.
-  /** Try the Panorama shop. False = no HUD available, caller should fall back. */
-  const openShopHud = (slot: number): boolean => {
-    const ui = getTttHud();
-    if (!ui) return false;
-    if (ui.isShopOpen(slot)) { ui.closeShop(slot); return true; }
-    return ui.openShop(slot);
-  };
-
   const shopMenu = (cmd: CommandInvocation): void => {
     const slot = cmd.callerSlot;
     if (slot < 0) { cmd.reply("sm_shop needs an in-game caller"); return; }
     if (!openShopHud(slot)) openShopMenu(slot);
   };
-  commands.register("sm_shopmenu", shopMenu);
+  command("sm_shopmenu", shopMenu);
 
-  commands.register("sm_buy", buy);
-  commands.register("sm_purchase", buy);
-  commands.register("sm_b", buy);
-  commands.register("sm_list", list);
+  command("sm_buy", buy);
+  command("sm_purchase", buy);
+  command("sm_b", buy);
+  command("sm_list", list);
   // `!shop`/`!list` from a player opens the interactive menu; the console still gets the plain dump.
   // The middle-mouse ping opens the shop — the one input a CS2 player has spare mid-round that
   // costs no keyboard hand, which matters in a mode where stopping to type is how you get shot.
@@ -394,16 +474,16 @@ export function registerCommands(commands: CtxCommands): void {
   // `register` cannot be used here, because the ENGINE already owns the name and refuses to link a
   // second ConCommand to it. Observe-only: no HookResult is returned, so the ping marker is still
   // placed exactly as normal.
-  commands.onClientCommand("player_ping", (slot) => {
+  command.onClientCommand("player_ping", (slot) => {
     onPlayerPing(slot);
   });
 
-  commands.register("sm_menu", (cmd) => {
+  command("sm_menu", (cmd) => {
     if (cmd.callerSlot < 0) list(cmd);
     else openShopMenu(cmd.callerSlot);
   });
 
-  commands.register("sm_shop", (cmd) => {
+  command("sm_shop", (cmd) => {
     const sub = cmd.arg(0).toLowerCase();
     switch (sub) {
       case "buy":
@@ -428,7 +508,7 @@ export function registerCommands(commands: CtxCommands): void {
   });
 
   // ── admin ─────────────────────────────────────────────────────────────────
-  commands.registerAdmin("sm_ttt_start", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_ttt_start", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.Waiting) {
       cmd.reply(msgFor(cmd.callerSlot, "GENERIC_ERROR", "A round is already running"));
       return;
@@ -437,7 +517,7 @@ export function registerCommands(commands: CtxCommands): void {
     cmd.reply(msgFor(cmd.callerSlot, "CMD_ROUND_STARTING"));
   });
 
-  commands.registerAdmin("sm_ttt_end", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_ttt_end", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Countdown) {
       cmd.reply(msgFor(cmd.callerSlot, "GENERIC_ERROR", "No round is running"));
       return;
@@ -446,7 +526,7 @@ export function registerCommands(commands: CtxCommands): void {
     cmd.reply(msgFor(cmd.callerSlot, "CMD_ROUND_ENDED"));
   });
 
-  commands.registerAdmin("sm_ttt_special", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_ttt_special", ADMFLAG.GENERIC, (cmd) => {
     const id = cmd.arg(0).toLowerCase();
     if (id === "") {
       cmd.reply(msgFor(cmd.callerSlot, "CMD_SPECIAL_AVAILABLE", roundIds().join(", ")));
@@ -463,7 +543,7 @@ export function registerCommands(commands: CtxCommands): void {
    * no way to put a benched player back in: karma and the sit-out counter are separate state, and
    * the C# build exposed neither (its `!karma` only ever read your own).
    */
-  commands.registerAdmin("sm_ttt_karma", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_ttt_karma", ADMFLAG.GENERIC, (cmd) => {
     if (cmd.argCount === 0) {
       const active = reg.activeSlots();
       for (let i = 0; i < active.length; i++) {
@@ -505,7 +585,7 @@ export function registerCommands(commands: CtxCommands): void {
   });
 
   /** `ttt_give <target> <item>` — grant a shop item for free (port of the C# `GiveItemCommand`). */
-  commands.registerAdmin("sm_ttt_give", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_ttt_give", ADMFLAG.GENERIC, (cmd) => {
     if (cmd.argCount === 0) {
       cmd.reply(msgFor(cmd.callerSlot, "CMD_ITEM_LIST", allItems().map((i) => i.id).join(", ")));
       cmd.reply(msgFor(cmd.callerSlot, "CMD_USAGE_GIVE"));
@@ -534,7 +614,7 @@ export function registerCommands(commands: CtxCommands): void {
    * player, no colour. This is the in-game version — readable at a glance while spectating, which
    * is the only way to follow a round once you are dead.
    */
-  commands.registerAdmin("sm_ttt_roles", ADMFLAG.GENERIC, (cmd) => {
+  command.admin("sm_ttt_roles", ADMFLAG.GENERIC, (cmd) => {
     if (game.state !== GameState.InProgress && game.state !== GameState.Finished) {
       cmd.replyToChat(msg("GAME_LOGS_NONE"));
       return;
@@ -597,7 +677,7 @@ export function registerCommands(commands: CtxCommands): void {
    * rounds to afford it. Goes through `addBalance` with the delta rather than writing the balance
    * directly, so the `balance` bus event still fires and anything listening stays consistent.
    */
-  commands.registerAdmin("sm_ttt_credits", ADMFLAG.ROOT, (cmd) => {
+  command.admin("sm_ttt_credits", ADMFLAG.ROOT, (cmd) => {
     if (cmd.arg(0) === "" || cmd.arg(1) === "") {
       cmd.reply("usage: sm_ttt_credits <target> <amount>");
       return;
@@ -616,7 +696,7 @@ export function registerCommands(commands: CtxCommands): void {
     cmd.reply(`${reg.nameOf(slot)} now has ${String(balanceOf(slot))} credits`);
   });
 
-  commands.registerAdmin("sm_ttt_testkill", ADMFLAG.ROOT, (cmd) => {
+  command.admin("sm_ttt_testkill", ADMFLAG.ROOT, (cmd) => {
     if (cmd.arg(0) === "") {
       cmd.reply("usage: sm_ttt_testkill <victim> [killer]  (killer defaults to a live Traitor)");
       return;
@@ -661,7 +741,7 @@ export function registerCommands(commands: CtxCommands): void {
     cmd.reply(`killed ${reg.nameOf(victim)}, credited to ${reg.nameOf(killer)} (${roleName(reg.roleOf(killer))})`);
   });
 
-  commands.registerAdmin("sm_ttt_myrole", ADMFLAG.ROOT, (cmd) => {
+  command.admin("sm_ttt_myrole", ADMFLAG.ROOT, (cmd) => {
     const me = cmd.callerSlot;
     if (me < 0) {
       cmd.reply(msgFor(me, "CMD_MYROLE_NO_SLOT"));
@@ -699,7 +779,7 @@ export function registerCommands(commands: CtxCommands): void {
    * involved: if the door then opens, the mechanism is sound and the fault is upstream in the deal;
    * if it still does nothing, the deal was never the problem.
    */
-  commands.registerAdmin("sm_ttt_context", ADMFLAG.ROOT, (cmd) => {
+  command.admin("sm_ttt_context", ADMFLAG.ROOT, (cmd) => {
     const me = cmd.callerSlot;
     // A context is applied to a pawn, and the console does not have one.
     if (me < 0) {
@@ -737,7 +817,7 @@ export function registerCommands(commands: CtxCommands): void {
   // loadout, no team switch. That is useful for exercising karma and the win checks, and actively
   // misleading for anything else, which is not a footgun to leave on a generic admin flag. Use
   // `ttt_context` to test map integrations and `ttt_myrole` to reserve a real role for the next deal.
-  commands.registerAdmin("sm_ttt_setrole", ADMFLAG.ROOT, (cmd) => {
+  command.admin("sm_ttt_setrole", ADMFLAG.ROOT, (cmd) => {
     const slot = cmd.argInt(0, -1);
     const roleName_ = cmd.arg(1).toLowerCase();
     const role =
