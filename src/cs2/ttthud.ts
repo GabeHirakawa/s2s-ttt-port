@@ -33,14 +33,9 @@ import { msg, msgFor } from "../core/msgs";
  */
 export type LogRow = Row & { readonly tone?: "good" | "warn" | "bad" };
 
-/**
- * Rows per page on the one shared sheet. Fixed at claim time, so every mode lives with it — 8 is
- * the round log's figure, the largest of the three.
- */
-const SHEET_PAGE = 8;
-
-/** Which surface the shared sheet is drawing for a given player. */
-type SheetMode = "shop" | "rdm" | "logs";
+const RDM_PAGE = 6;
+/** Log lines per page. The sheet is `xl`, so it can carry more rows than the shop. */
+const LOG_PAGE = 8;
 /** Seconds of game time a slot must wait between purchases. */
 const BUY_DEBOUNCE = 0.3;
 
@@ -60,9 +55,9 @@ export class TttHud {
    * release/re-claim cycle re-registers the same row ids and blows up on the second open. Holding
    * the claim once taken is the safe half of the fix.
    */
-  private sheet: Modal | null = null;
-  /** What the one shared sheet is currently showing for each slot. */
-  private readonly mode = new Map<number, SheetMode>();
+  private shop: Modal | null = null;
+  private rdm: Modal | null = null;
+  private logs: Modal | null = null;
   private readonly badge: Badge | null;
   /**
    * Per-admin slay count, ONLY when the admin has overridden the escalated default.
@@ -78,7 +73,9 @@ export class TttHud {
   private readonly lastBuyAt = new Map<number, number>();
 
   /** Built once in the constructor; handed to {@link Components.modal} on each claim. */
-  private readonly sheetSpec: ModalSpec;
+  private readonly shopSpec: ModalSpec;
+  private readonly rdmSpec: ModalSpec;
+  private readonly logsSpec: ModalSpec;
   /** The round log as rows, rebuilt on each open. */
   private logRows: LogRow[] = [];
   /** Which archived round each admin is browsing (0 = most recent). */
@@ -113,93 +110,82 @@ export class TttHud {
     this.ui = CustomHudLayout.components(hudkit.spec);
     this.badge = this.ui.badge({ corner: "tr", accent: "bad" });
 
-    // ONE spec for all three surfaces, dispatching on a per-slot mode.
+    // THREE SEPARATE SHEETS, deliberately — do NOT merge them again.
     //
-    // NOT a style choice — a hard budget. The pooled sheets are HOST-GLOBAL and there are exactly
-    // TWO for the entire server, shared with every other plugin AND with the framework's own menu
-    // renderer (which claims one during the prelude, before any plugin runs). TTT can therefore
-    // hold exactly one. Claiming three, as this used to, meant the shop took the last free sheet
-    // and the round log and the RDM queue got nothing: `openLogs` returned false on a live server
-    // and the log silently fell back to the developer console, which is what it was doing.
+    // A previous change folded all three into one claimed sheet with a per-slot mode, to live
+    // inside the two-sheet pool. It is wrong, and the reason is in `components.js`: the footer
+    // click handlers are ONE ARRAY PER MODAL, rebuilt on every paint —
     //
-    // A Modal is a claimed POOL SLOT, not a per-player window — `open(slot)` is already per-player.
-    // So one claim serves everybody, and the mode decides what it draws.
+    //     var footerFns = [];   // resolved per paint, read by the click handlers below
     //
-    // `width` and `pageSize` are the cost: both are fixed at claim time and cannot vary per slot.
-    // `xl` and 8 rows are the round log's needs, which are the largest of the three; the shop is
-    // wider than it was and no worse for it.
-    this.sheetSpec = {
-      title: (slot) => {
-        switch (this.modeOf(slot)) {
-          case "rdm":  return "RDM Reports";
-          case "logs": return "Round Log";
-          default:     return "TTT Shop";
-        }
-      },
+    // The row and button TEXT is per-player (it goes through the *ForPlayer* natives), but the
+    // handlers are not. So a single sheet serving a player the shop and an admin the RDM queue
+    // paints each of them the right labels and then dispatches whichever set was painted LAST to
+    // both. Live result: a player's shop showing a Ban button.
+    //
+    // One sheet can serve any number of players the SAME spec — `open(slot)` is per-player — but
+    // never different button sets. Surfaces with different footers need different modals.
+    this.shopSpec = {
+      title: "TTT Shop",
+      subtitle: (slot) => `${balanceOf(slot)} credits`,
+      rows: (slot) => this.shopRows(slot),
+      // Clicking a row SELECTS it. Buying is a second, deliberate press: a mis-click must not spend
+      // credits, and one physical click can reach us more than once.
+      onPick: (slot) => { this.shop?.refresh(slot); },
+      detail: (slot, row, cursor) => this.shopDetail(slot, cursor),
+      width: "sm",
+      buttons: [
+        { text: "Buy", variant: "good", onClick: (slot) => this.buySelected(slot) },
+        { text: "Close", variant: "ghost", onClick: (slot) => this.closeShop(slot) },
+      ],
+    };
+
+    this.logsSpec = {
+      title: "Round Log",
       subtitle: (slot) => {
-        switch (this.modeOf(slot)) {
-          case "rdm":  return `${pending().length} pending`;
-          case "logs": {
-            const at = this.logAt.get(slot) ?? 0;
-            const n = this.logRows.length;
-            return `round ${this.logRound} · ${n} entr${n === 1 ? "y" : "ies"}` +
-              (this.logTotal > 1 ? ` · ${at + 1}/${this.logTotal}` : "");
-          }
-          default:     return `${balanceOf(slot)} credits`;
-        }
+        const at = this.logAt.get(slot) ?? 0;
+        const n = this.logRows.length;
+        return `round ${this.logRound} · ${n} entr${n === 1 ? "y" : "ies"}` +
+          (this.logTotal > 1 ? ` · ${at + 1}/${this.logTotal}` : "");
       },
-      rows: (slot) => {
-        switch (this.modeOf(slot)) {
-          case "rdm":  return this.rdmRows();
-          case "logs": return this.logRows;
-          default:     return this.shopRows(slot);
-        }
-      },
-      onPick: (slot) => {
-        // Every mode treats a row click as SELECT-only. For the shop that is deliberate (buying is
-        // a second, explicit press, so a mis-click cannot spend credits and a doubled click cannot
-        // buy twice); for the log a row is a record to read in the detail box; for the RDM queue
-        // moving the cursor also drops the per-report scratch, because a slay count typed for one
-        // report must not carry onto the next and an armed ban must never survive the move.
-        if (this.modeOf(slot) === "rdm") {
-          this.slayOverride.delete(slot);
-          this.banArmed.delete(slot);
-        }
-        this.sheet?.refresh(slot);
-      },
-      detail: (slot, row, cursor) => {
-        switch (this.modeOf(slot)) {
-          case "rdm":  return this.rdmDetail(slot, cursor);
-          case "logs": return row === undefined ? [] : [row.a];
-          default:     return this.shopDetail(slot, cursor);
-        }
-      },
+      pageSize: LOG_PAGE,
       width: "xl",
-      pageSize: SHEET_PAGE,
-      buttons: (slot) => {
-        switch (this.modeOf(slot)) {
-          // FIVE is the hard ceiling, and paging claims the trailing two — so the two ± steppers
-          // this used to carry could not coexist with a Ban button. Cycling one button through the
-          // ladder costs a click at worst and reads better than a pair of arrows either way.
-          case "rdm": return [
-            { text: "Close", variant: "ghost" as const, onClick: (s: number) => this.closeRdm(s) },
-            { text: `Slays: ${this.slaysFor(slot)}`, variant: "ghost" as const, onClick: (s: number) => this.cycleSlays(s) },
-            { text: "Acquit", variant: "good" as const, onClick: (s: number) => this.verdict(s, Verdict.Innocent) },
-            { text: "Convict", variant: "bad" as const, onClick: (s: number) => this.verdict(s, Verdict.Guilty) },
-            { text: this.banArmedFor(slot) ? "Confirm ban" : "Ban", variant: "bad" as const, onClick: (s: number) => this.banStep(s) },
-          ];
-          // Three buttons, because paging claims the trailing two and the log always pages.
-          case "logs": return [
-            { text: "Close", variant: "ghost" as const, onClick: (s: number) => this.closeLogs(s) },
-            { text: "◀ older", variant: "ghost" as const, onClick: (s: number) => this.stepLog(s, +1) },
-            { text: "newer ▶", variant: "ghost" as const, onClick: (s: number) => this.stepLog(s, -1) },
-          ];
-          default: return [
-            { text: "Buy", variant: "good" as const, onClick: (s: number) => this.buySelected(s) },
-            { text: "Close", variant: "ghost" as const, onClick: (s: number) => this.closeShop(s) },
-          ];
-        }
+      rows: () => this.logRows,
+      // Rows are plain text: picking one selects it so a long line can be read in the detail box.
+      onPick: (slot) => { this.logs?.refresh(slot); },
+      detail: (slot, row) => (row === undefined ? [] : [row.a]),
+      // Three, because the log always pages and paging claims the trailing two footer slots.
+      buttons: [
+        { text: "Close", variant: "ghost", onClick: (slot) => this.closeLogs(slot) },
+        { text: "◀ older", variant: "ghost", onClick: (slot) => this.stepLog(slot, +1) },
+        { text: "newer ▶", variant: "ghost", onClick: (slot) => this.stepLog(slot, -1) },
+      ],
+    };
+
+    this.rdmSpec = {
+      title: "RDM Reports",
+      subtitle: () => `${pending().length} pending`,
+      pageSize: RDM_PAGE,
+      width: "lg",
+      rows: () => this.rdmRows(),
+      // Moving the cursor drops BOTH pieces of per-report scratch: a slay count typed for one
+      // report must not carry onto the next, and an armed ban must never survive the move.
+      onPick: (slot) => {
+        this.slayOverride.delete(slot);
+        this.banArmed.delete(slot);
+        this.rdm?.refresh(slot);
       },
+      detail: (slot, row, cursor) => this.rdmDetail(slot, cursor),
+      // FIVE is the ceiling and paging claims two, so the ± steppers became one cycling button to
+      // make room for Ban. Only the LABELS vary per slot here; the handler SET is identical for
+      // every admin, which is what keeps this safe under the shared-footerFns rule above.
+      buttons: (slot) => [
+        { text: "Close", variant: "ghost" as const, onClick: (s: number) => this.closeRdm(s) },
+        { text: `Slays: ${this.slaysFor(slot)}`, variant: "ghost" as const, onClick: (s: number) => this.cycleSlays(s) },
+        { text: "Acquit", variant: "good" as const, onClick: (s: number) => this.verdict(s, Verdict.Innocent) },
+        { text: "Convict", variant: "bad" as const, onClick: (s: number) => this.verdict(s, Verdict.Guilty) },
+        { text: this.banArmedFor(slot) ? "Confirm ban" : "Ban", variant: "bad" as const, onClick: (s: number) => this.banStep(s) },
+      ],
     };
 
     const b = this.ui.budget();
@@ -228,7 +214,7 @@ export class TttHud {
 
   // ── shop ──────────────────────────────────────────────────────────────────────────────────────
 
-  isShopOpen(slot: number): boolean { return this.openIn(slot, "shop"); }
+  isShopOpen(slot: number): boolean { return this.shop?.isOpen(slot) ?? false; }
 
   /**
    * Open the Panorama shop. Returns false when there is nothing to show, so the caller can fall
@@ -244,10 +230,8 @@ export class TttHud {
       this.log(`shop HUD unavailable: ${why}`);
       return false;
     }
-    const shop = this.claimSheet();
+    const shop = this.claimShop();
     if (shop === null) return false;
-    // Set the mode BEFORE opening: the spec's callbacks all read it, and `open` paints immediately.
-    this.mode.set(slot, "shop");
     // Hide the whole pool for this player FIRST.
     //
     // Pool panels are shared, and per-player state persists on the entity: anything a previous
@@ -270,7 +254,7 @@ export class TttHud {
   }
 
   closeShop(slot: number): void {
-    if (this.openIn(slot, "shop")) this.sheet?.close(slot);
+    this.shop?.close(slot);
   }
 
   /** Items this player could ever buy. Role-locked ones are omitted rather than greyed. */
@@ -324,14 +308,14 @@ export class TttHud {
 
   /** Buy whatever row is highlighted. The ONLY path that spends credits. */
   private buySelected(slot: number): void {
-    if (!this.openIn(slot, "shop")) return;
+    if (!this.shop) return;
     // A single physical click can reach the server more than once, and two purchases from one
     // press is the kind of bug players notice by being out of credits. One buy per press.
     const now = Server.gameTime;
     const last = this.lastBuyAt.get(slot);
     if (last !== undefined && now - last < BUY_DEBOUNCE) return;
     this.lastBuyAt.set(slot, now);
-    this.buy(slot, this.sheet!.cursor(slot));
+    this.buy(slot, this.shop.cursor(slot));
   }
 
   private buy(slot: number, index: number): void {
@@ -358,7 +342,7 @@ export class TttHud {
       variant: ok ? "good" : "bad",
       holdSeconds: 4,
     });
-    if (this.openIn(slot, "shop")) this.sheet?.refresh(slot);   // credits and affordability both moved
+    this.shop?.refresh(slot);   // credits and affordability both moved
   }
 
   // ── round log ─────────────────────────────────────────────────────────────────────────────────
@@ -370,9 +354,8 @@ export class TttHud {
   openLogs(slot: number, lines: readonly LogRow[]): boolean {
     const why = this.ui.ensure();
     if (why !== null) return false;
-    const modal = this.claimSheet();
+    const modal = this.claimLogs();
     if (modal === null) return false;
-    this.mode.set(slot, "logs");
     this.logAt.set(slot, 0);
     this.logTotal = this.logPage?.(0).count ?? 1;
     this.logRound = this.logPage?.(0).round ?? 0;
@@ -385,14 +368,14 @@ export class TttHud {
     return true;
   }
 
-  isLogsOpen(slot: number): boolean { return this.openIn(slot, "logs"); }
+  isLogsOpen(slot: number): boolean { return this.logs?.isOpen(slot) ?? false; }
 
   /**
    * Walk the browse index. `+1` is OLDER (further back), which is why the button reads "◀ older" —
    * the arrow points the way the reader is travelling, not the way the number moves.
    */
   private stepLog(slot: number, delta: number): void {
-    if (!this.openIn(slot, "logs") || this.logPage === null) return;
+    if (!this.logs?.isOpen(slot) || this.logPage === null) return;
     const max = Math.max(0, this.logTotal - 1);
     const at = Math.max(0, Math.min(max, (this.logAt.get(slot) ?? 0) + delta));
     const page = this.logPage(at);
@@ -400,8 +383,8 @@ export class TttHud {
     this.logRows = page.rows;
     this.logRound = page.round;
     this.logTotal = page.count;
-    this.sheet?.select(slot, 0);
-    this.sheet?.refresh(slot);
+    this.logs?.select(slot, 0);
+    this.logs?.refresh(slot);
   }
 
   /**
@@ -413,33 +396,28 @@ export class TttHud {
   openLogBrowser(slot: number): boolean {
     if (this.logPage === null) return false;
     if (this.ui.ensure() !== null) return false;
-    const modal = this.claimSheet();
+    const modal = this.claimLogs();
     if (modal === null) return false;
     const page = this.logPage(0);
     this.logAt.set(slot, 0);
     this.logRows = page.rows;
     this.logRound = page.round;
     this.logTotal = page.count;
-    this.mode.set(slot, "logs");
-    this.logAt.set(slot, 0);
-    this.logTotal = this.logPage?.(0).count ?? 1;
-    this.logRound = this.logPage?.(0).round ?? 0;
     this.ui.hideAll(slot);
     modal.open(slot);
     modal.select(slot, 0);
     return true;
   }
 
-  closeLogs(slot: number): void { if (this.openIn(slot, "logs")) this.sheet?.close(slot); }
+  closeLogs(slot: number): void { this.logs?.close(slot); }
 
   // ── RDM manager ───────────────────────────────────────────────────────────────────────────────
 
-  isRdmOpen(slot: number): boolean { return this.openIn(slot, "rdm"); }
+  isRdmOpen(slot: number): boolean { return this.rdm?.isOpen(slot) ?? false; }
 
   openRdm(slot: number): void {
-    const rdm = this.claimSheet();
+    const rdm = this.claimRdm();
     if (rdm === null) return;
-    this.mode.set(slot, "rdm");
     this.ui.hideAll(slot);
     // No seeded count: `slaysFor` reads the ladder for whichever report the cursor lands on.
     this.slayOverride.delete(slot);
@@ -451,7 +429,7 @@ export class TttHud {
     this.slayOverride.delete(slot);
     // An armed ban NEVER survives the sheet closing — reopening it must not fire on one press.
     this.banArmed.delete(slot);
-    if (this.openIn(slot, "rdm")) this.sheet?.close(slot);
+    this.rdm?.close(slot);
   }
 
   private rdmRows(): Row[] {
@@ -481,8 +459,8 @@ export class TttHud {
 
   /** The report the admin's cursor is on, or undefined. */
   private selected(slot: number): RdmReport | undefined {
-    if (!this.openIn(slot, "rdm")) return undefined;
-    return pending()[this.sheet!.cursor(slot)];
+    if (!this.rdm?.isOpen(slot)) return undefined;
+    return pending()[this.rdm.cursor(slot)];
   }
 
   /**
@@ -501,10 +479,10 @@ export class TttHud {
 
   /** Cycle the slay count through the ladder and wrap. One button, because the footer holds five. */
   private cycleSlays(slot: number): void {
-    if (!this.openIn(slot, "rdm")) return;
+    if (!this.rdm?.isOpen(slot)) return;
     const next = this.slaysFor(slot) + BASE_SLAYS;
     this.slayOverride.set(slot, next > MAX_QUEUED ? BASE_SLAYS : next);
-    this.sheet?.refresh(slot);
+    this.rdm?.refresh(slot);
   }
 
   private banArmedFor(slot: number): boolean {
@@ -531,7 +509,7 @@ export class TttHud {
         variant: "warn",
         holdSeconds: 6,
       });
-      this.sheet?.refresh(slot);
+      this.rdm?.refresh(slot);
       return;
     }
     this.banArmed.delete(slot);
@@ -547,13 +525,13 @@ export class TttHud {
       holdSeconds: 5,
     });
     this.log(`rdm #${sel.id}: ${sel.accusedName} BANNED by ${admin}` + (ruled ? "" : " (report already ruled)"));
-    this.sheet?.select(slot, 0);
+    this.rdm?.select(slot, 0);
     this.refreshRdm();
   }
 
   private verdict(slot: number, v: Verdict): void {
-    if (!this.openIn(slot, "rdm")) return;
-    const report = pending()[this.sheet!.cursor(slot)];
+    if (!this.rdm?.isOpen(slot)) return;
+    const report = pending()[this.rdm.cursor(slot)];
     if (!report) return;
     const admin = Player.fromSlot(slot)?.playerName ?? `slot ${slot}`;
     const ruled = rule(report.id, v, this.slaysFor(slot), admin);
@@ -575,12 +553,12 @@ export class TttHud {
     });
     this.log(`rdm #${ruled.id}: ${ruled.reporterName} vs ${ruled.accusedName} -> ` +
       `${v === Verdict.Guilty ? `guilty (${ruled.slays} slays)` : "innocent"} by ${admin}`);
-    this.sheet?.select(slot, 0);
+    this.rdm?.select(slot, 0);
     this.refreshRdm();
   }
 
   /** Repaint every admin with the queue open — a new report has to appear without a reopen. */
-  refreshRdm(): void { this.sheet?.refresh(); }
+  refreshRdm(): void { this.rdm?.refresh(); }
 
   /** Tell every admin a report landed. The toast is the notification; the modal is the workflow. */
   notifyAdmins(title: string, message: string): void {
@@ -601,15 +579,17 @@ export class TttHud {
     }
     this.slayOverride.clear();
     this.banArmed.clear();
-    this.mode.clear();
+    this.logAt.clear();
   }
 
   forget(slot: number): void {
     this.slayOverride.delete(slot);
     this.banArmed.delete(slot);
     this.lastBuyAt.delete(slot);
-    this.mode.delete(slot);
-    this.sheet?.forget(slot);
+    this.logAt.delete(slot);
+    this.shop?.forget(slot);
+    this.rdm?.forget(slot);
+    this.logs?.forget(slot);
     this.ui.forget(slot);
     // A player who disconnects with a sheet up is still a viewer as far as the claim is concerned;
     // dropping them here is what lets the last one out release the panel.
@@ -631,22 +611,39 @@ export class TttHud {
    * registered, and `HudLayout.onClick` throws on a duplicate id — so a release/re-claim cycle
    * blows up on the second open. Holding the claim once taken is the safe half of that.
    */
-  private claimSheet(): Modal | null {
-    if (this.sheet === null) {
-      this.sheet = this.ui.modal(this.sheetSpec);
-      if (this.sheet === null) this.log("modal pool exhausted — shop/log/RDM fall back to chat and console");
+  /**
+   * Claim a modal, once, on first use.
+   *
+   * Lazily rather than at load: the pool is HOST-GLOBAL (two sheets for the whole server, shared
+   * with every plugin and with the framework's menu renderer, which claims one during the prelude),
+   * so a server where nobody opens a thing should not hold a slot the admin menu might need.
+   *
+   * NEVER released. `Modal.release` frees the pool slot but leaves this layout's button handlers
+   * registered, and `HudLayout.onClick` throws on a duplicate id — so a release/re-claim cycle
+   * blows up on the second open.
+   */
+  private claimShop(): Modal | null {
+    if (this.shop === null) {
+      this.shop = this.ui.modal(this.shopSpec);
+      if (this.shop === null) this.log("modal pool exhausted — shop falls back to the chat menu");
     }
-    return this.sheet;
+    return this.shop;
   }
 
-  /** What the shared sheet is showing for `slot` (defaults to the shop). */
-  private modeOf(slot: number): SheetMode {
-    return this.mode.get(slot) ?? "shop";
+  private claimLogs(): Modal | null {
+    if (this.logs === null) {
+      this.logs = this.ui.modal(this.logsSpec);
+      if (this.logs === null) this.log("modal pool exhausted — round log falls back to console");
+    }
+    return this.logs;
   }
 
-  /** Is the sheet open for `slot` in `want` mode? */
-  private openIn(slot: number, want: SheetMode): boolean {
-    return this.sheet?.isOpen(slot) === true && this.modeOf(slot) === want;
+  private claimRdm(): Modal | null {
+    if (this.rdm === null) {
+      this.rdm = this.ui.modal(this.rdmSpec);
+      if (this.rdm === null) this.log("modal pool exhausted — RDM manager unavailable");
+    }
+    return this.rdm;
   }
 
 
