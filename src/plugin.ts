@@ -45,6 +45,7 @@ import { tell, tellAll, pawnOf } from "./cs2/pawn";
 import { resetBuyMenu, tickBuyMenu } from "./cs2/buymenu";
 import { queueSlays, serveRoundStart, resetSanctions, recordGuilty, pardon } from "./rdm/sanctions";
 import { captureSay, installRdmFlow, resetRdmFlow, tickRdmFlow } from "./rdm/flow";
+import { logCount, logRoundAt, makeLogRows } from "./game/logger";
 import { Bans } from "@s2script/sdk/bans";
 import { Clients } from "@s2script/sdk/clients";
 import { Admin, ADMFLAG } from "@s2script/sdk/admin";
@@ -74,7 +75,7 @@ import {
 } from "./cs2/combat";
 import { precacheBodyModels } from "./cs2/bodies";
 import { initInteract, inspectIdentify, tickInteract } from "./cs2/interact";
-import { reassertSpoof, tickSpoof } from "./cs2/spoof";
+import { unspoofAlive,reassertSpoof, tickSpoof } from "./cs2/spoof";
 import { installFeedback } from "./cs2/feedback";
 import { wouldRefuseTeam } from "./game/teams";
 import { installIcons, precacheRoleModels } from "./cs2/icons";
@@ -577,6 +578,9 @@ export function OnPluginStart(): void {
     );
     tellAll(`[ttt] ${name} was found guilty of RDM — ${total} slay(s) queued.`);
   };
+  // The log browser's data source. Injected because `game/logger.ts` already imports the HUD for
+  // `getTttHud`, so importing it back would close a module-evaluation cycle.
+  ui.logPage = (at) => ({ rows: makeLogRows(at), round: logRoundAt(at), count: Math.max(1, logCount()) });
   ui.onBan = (steamId, name, admin) => {
     if (steamId === "") {
       console.log(`[ttt/rdm] ${admin} tried to ban ${name} but no SteamID was recorded`);
@@ -662,5 +666,13 @@ function serveQueuedSlays(): void {
     // Say WHY they had no role this round. Being killed at the buzzer with no explanation reads as
     // a bug, and the exclusion from role selection is the half nobody can see.
     tell(s.slot, msg("RDM_SANCTION_BENCHED"));
+    // Announced to EVERYONE, not just the person served. A player dropping dead at the round start
+    // with no explanation looks like a bug to the other nine people watching it happen, and the
+    // deterrent only works if the server can see it land.
+    tellAll(msg("RDM_SANCTION_SERVED", reg.nameOf(s.slot)));
+    // The death illusion must never cover a sanction: TTT normally keeps a dead player reading as
+    // alive until their body is found, which would leave a slain player showing as alive on the
+    // scoreboard for the whole round. This is a punishment, not a secret.
+    unspoofAlive(s.slot);
   }
 }

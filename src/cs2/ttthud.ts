@@ -81,11 +81,22 @@ export class TttHud {
   private readonly sheetSpec: ModalSpec;
   /** The round log as rows, rebuilt on each open. */
   private logRows: LogRow[] = [];
+  /** Which archived round each admin is browsing (0 = most recent). */
+  private readonly logAt = new Map<number, number>();
+  /** Round number and total page count describing whatever `logRows` currently holds. */
+  private logRound = 0;
+  private logTotal = 0;
 
   /** Fired when an admin rules Guilty. Sanctioning lives in the plugin, not the UI. */
   onGuilty: ((steamId: string, name: string, slays: number, admin: string) => void) | null = null;
   /** Fired when an admin confirms a ban. Banning lives in the plugin, not the UI. */
   onBan: ((steamId: string, name: string, admin: string) => void) | null = null;
+  /**
+   * Fetch one page of round history. Injected rather than imported: `game/logger.ts` already
+   * imports this module for `getTttHud`, so importing it back would close a module-evaluation
+   * cycle. Same shape as `onGuilty`/`onBan` — the UI asks, the plugin owns the data.
+   */
+  logPage: ((at: number) => { rows: LogRow[]; round: number; count: number }) | null = null;
 
   constructor(
     private readonly log: (s: string) => void,
@@ -128,7 +139,12 @@ export class TttHud {
       subtitle: (slot) => {
         switch (this.modeOf(slot)) {
           case "rdm":  return `${pending().length} pending`;
-          case "logs": return `${this.logRows.length} entr${this.logRows.length === 1 ? "y" : "ies"}`;
+          case "logs": {
+            const at = this.logAt.get(slot) ?? 0;
+            const n = this.logRows.length;
+            return `round ${this.logRound} · ${n} entr${n === 1 ? "y" : "ies"}` +
+              (this.logTotal > 1 ? ` · ${at + 1}/${this.logTotal}` : "");
+          }
           default:     return `${balanceOf(slot)} credits`;
         }
       },
@@ -172,8 +188,11 @@ export class TttHud {
             { text: "Convict", variant: "bad" as const, onClick: (s: number) => this.verdict(s, Verdict.Guilty) },
             { text: this.banArmedFor(slot) ? "Confirm ban" : "Ban", variant: "bad" as const, onClick: (s: number) => this.banStep(s) },
           ];
+          // Three buttons, because paging claims the trailing two and the log always pages.
           case "logs": return [
             { text: "Close", variant: "ghost" as const, onClick: (s: number) => this.closeLogs(s) },
+            { text: "◀ older", variant: "ghost" as const, onClick: (s: number) => this.stepLog(s, +1) },
+            { text: "newer ▶", variant: "ghost" as const, onClick: (s: number) => this.stepLog(s, -1) },
           ];
           default: return [
             { text: "Buy", variant: "good" as const, onClick: (s: number) => this.buySelected(s) },
@@ -354,6 +373,9 @@ export class TttHud {
     const modal = this.claimSheet();
     if (modal === null) return false;
     this.mode.set(slot, "logs");
+    this.logAt.set(slot, 0);
+    this.logTotal = this.logPage?.(0).count ?? 1;
+    this.logRound = this.logPage?.(0).round ?? 0;
     // Rows arrive already toned: the logger decides what counts as a bad action, because that is a
     // rule of the mode and not a property of the sheet.
     this.logRows = lines.slice();
@@ -364,6 +386,49 @@ export class TttHud {
   }
 
   isLogsOpen(slot: number): boolean { return this.openIn(slot, "logs"); }
+
+  /**
+   * Walk the browse index. `+1` is OLDER (further back), which is why the button reads "◀ older" —
+   * the arrow points the way the reader is travelling, not the way the number moves.
+   */
+  private stepLog(slot: number, delta: number): void {
+    if (!this.openIn(slot, "logs") || this.logPage === null) return;
+    const max = Math.max(0, this.logTotal - 1);
+    const at = Math.max(0, Math.min(max, (this.logAt.get(slot) ?? 0) + delta));
+    const page = this.logPage(at);
+    this.logAt.set(slot, at);
+    this.logRows = page.rows;
+    this.logRound = page.round;
+    this.logTotal = page.count;
+    this.sheet?.select(slot, 0);
+    this.sheet?.refresh(slot);
+  }
+
+  /**
+   * Open the log browser at the most recent round.
+   *
+   * Distinct from {@link openLogs}, which is the round-end push of a log the caller already built.
+   * This is the on-demand `!logs` path and owns its own paging state.
+   */
+  openLogBrowser(slot: number): boolean {
+    if (this.logPage === null) return false;
+    if (this.ui.ensure() !== null) return false;
+    const modal = this.claimSheet();
+    if (modal === null) return false;
+    const page = this.logPage(0);
+    this.logAt.set(slot, 0);
+    this.logRows = page.rows;
+    this.logRound = page.round;
+    this.logTotal = page.count;
+    this.mode.set(slot, "logs");
+    this.logAt.set(slot, 0);
+    this.logTotal = this.logPage?.(0).count ?? 1;
+    this.logRound = this.logPage?.(0).round ?? 0;
+    this.ui.hideAll(slot);
+    modal.open(slot);
+    modal.select(slot, 0);
+    return true;
+  }
 
   closeLogs(slot: number): void { if (this.openIn(slot, "logs")) this.sheet?.close(slot); }
 

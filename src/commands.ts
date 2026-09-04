@@ -309,10 +309,9 @@ export function registerCommands(): void {
       cmd.reply(msgFor(cmd.callerSlot, "GENERIC_NO_PERMISSION"));
       return;
     }
-    if (game.state !== GameState.InProgress && game.state !== GameState.Finished) {
-      cmd.reply(msgFor(cmd.callerSlot, "GAME_LOGS_NONE"));
-      return;
-    }
+    // NO game-state gate. An admin rules on a report during the NEXT round, or between maps, or
+    // while the server is idle — which is exactly when the old gate refused. The browser opens on
+    // the most recent round and pages back through the archive from there.
     const slot = cmd.callerSlot;
     // Viewing the logs while alive is announced, exactly as the original did — it is an
     // information advantage the rest of the server is entitled to know about.
@@ -321,7 +320,8 @@ export function registerCommands(): void {
     } else if (slot >= 0) {
       cmd.reply(msgFor(cmd.callerSlot, "LOGS_VIEWED_INFO"));
     }
-    printLogsTo(slot);
+    // The pageable browser for a player; the flat console dump for rcon.
+    if (slot < 0 || getTttHud()?.openLogBrowser(slot) !== true) printLogsTo(slot);
   });
 
   // Fallbacks for the yes/no prompt, for anyone who closed the menu or plays with menus off.
