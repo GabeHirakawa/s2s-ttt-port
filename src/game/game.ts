@@ -26,6 +26,7 @@ import type { EventBus } from "../core/bus";
 import type { TttEvents } from "../core/events";
 import { assignRoles, revealTraitorBuddies, roleName, stripRoundWeapons } from "./roles";
 import { clearLog, printLogs } from "./logger";
+import { owedBy } from "../rdm/sanctions";
 import { clearBodies } from "../cs2/bodies";
 import {
   getHealth, isPlayingTeam, pawnOf, respawn, restoreFullHealth, setPawnIsAlive, teamOf, tellAll,
@@ -117,13 +118,26 @@ export function inProgress(): boolean {
   return game.state === GameState.InProgress;
 }
 
-/** How many players are eligible to play right now (on a team and alive). */
+/**
+ * How many players are eligible to play right now (on a team, alive, and not serving a sanction).
+ *
+ * SANCTIONED PLAYERS ARE EXCLUDED FROM THE ROLE POOL RATHER THAN PUNISHED INSIDE IT. A player who
+ * owes an RDM slay is about to be killed at the round start either way, and the alternative — deal
+ * them a role and then slay them — is strictly worse in two ways. A slain Traitor hands the round
+ * to the Innocents through no fault of anyone playing it, and a slain Detective removes the role
+ * the mode leans on hardest. Either turns one player's punishment into everybody's round.
+ *
+ * Leaving them out of the count as well is deliberate: they are not participating, so counting them
+ * toward `minPlayers` would start rounds that are a player short of what the operator asked for.
+ */
 function eligible(out: number[]): number[] {
   out.length = 0;
   const active = reg.activeSlots();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
-    if (reg.isAlive(slot)) out.push(slot);
+    if (!reg.isAlive(slot)) continue;
+    if (owedBy(reg.steamIdOf(slot)) > 0) continue;
+    out.push(slot);
   }
   return out;
 }

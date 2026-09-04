@@ -276,9 +276,20 @@ function noteDamage(attacker: number, victim: number): void {
   firstDamage[attacker * MAX_SLOTS + victim] = 1;
 }
 
-/** Did `a` strike `b` first? */
+/**
+ * Did `a` strike `b` first?
+ *
+ * Exported as {@link didStrikeFirst} because the RDM flow asks the same question the karma table
+ * does — "was this self-defence?" — and a second damage ledger kept beside this one would be two
+ * implementations that disagree the first time either changed.
+ */
 function struckFirst(a: number, b: number): boolean {
   return firstDamage[a * MAX_SLOTS + b] === 1;
+}
+
+/** Public read of the damage ledger — see {@link struckFirst}. */
+export function didStrikeFirst(a: number, b: number): boolean {
+  return struckFirst(a, b);
 }
 
 /**
