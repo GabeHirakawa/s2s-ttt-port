@@ -301,6 +301,13 @@ export function registerCommands(): void {
   });
 
   command("sm_logs", (cmd) => {
+    // Admins only — the log names every role, kill and purchase of the round, so a player reading
+    // it mid-round has solved the game. `isAdmin` lets the server console through, which is right:
+    // an operator reading their own console is not a participant.
+    if (!isAdmin(cmd.callerSlot)) {
+      cmd.reply(msgFor(cmd.callerSlot, "GENERIC_NO_PERMISSION"));
+      return;
+    }
     if (game.state !== GameState.InProgress && game.state !== GameState.Finished) {
       cmd.reply(msgFor(cmd.callerSlot, "GAME_LOGS_NONE"));
       return;

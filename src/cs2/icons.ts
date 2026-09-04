@@ -68,7 +68,7 @@ import { inProgress } from "../game/game";
 import { roleName } from "../game/roles";
 import { cfg } from "../core/cvars";
 import { ROLE_COLORS, type Rgb } from "./color";
-import { pawnOf, noteAppliedModel, clearAppliedModels } from "./pawn";
+import { pawnOf, noteAppliedModel, appliedModelOf, appliedModelPawnOf, clearAppliedModels } from "./pawn";
 
 /**
  * Height above the pawn ORIGIN (its feet) that the icon is CENTRED on.
@@ -634,15 +634,45 @@ function applyRoleVisuals(slot: number, role: RoleId, retries: number): void {
     }
   }
 
-  // PRE, not POST. The C# defers this identically — `Server.NextWorldUpdate(() => SetModel(...))` —
-  // and that drains pre-simulation. `nextFrame()` would drain POST, between the engine releasing
-  // indices and the snapshot going out. `setModel` re-stages a pawn every client holds, so the phase
-  // matters more here than almost anywhere else in the mode.
+  applyRoleModel(slot);
+}
+
+/**
+ * Dress `slot`'s pawn in the model its ROLE calls for, if it is not already wearing it.
+ *
+ * The model follows the role and never the team. That is the C#'s own rule — `RoleIconsHandler`
+ * picks `ev.Role is DetectiveRole ? CT_MODEL : T_MODEL` and consults nothing else — and under TTT's
+ * team model it has to be: a team is a public REVEAL channel, so an Innocent moved to CT because
+ * their body was found is still an Innocent and still wears the T uniform. Letting the team pick
+ * the model would hand every observer a free role read.
+ *
+ * Called at the deal and again on every respawn, because the swap does NOT survive one. `switchTeam`
+ * may respawn the pawn (the SDK says so, and the C# carries the same warning), and a fresh pawn
+ * wears the engine's team-default agent. Applying the model once at assignment — which is all the
+ * C# does, and all this did — meant every later team move silently undressed the player: a revealed
+ * Innocent finished the round in FBI kit while their role still said Innocent.
+ *
+ * PRE, not POST. The C# defers identically — `Server.NextWorldUpdate(() => SetModel(...))` — and
+ * that drains pre-simulation. `nextFrame()` would drain POST, between the engine releasing indices
+ * and the snapshot going out. `setModel` re-stages a pawn every client holds, so the phase matters
+ * more here than almost anywhere else in the mode.
+ */
+export function applyRoleModel(slot: number): void {
+  const role = reg.roleOf(slot);
+  // A spectator has no pawn to dress and no role to advertise.
+  if (role === RoleId.Spectator) return;
+  const want = roleModel(role);
   nextPreFrame(() => {
-    const later = pawnOf(slot);
-    if (later === null || !later.isValid || reg.roleOf(slot) !== role) return;
-    const applied = roleModel(role);
-    if (later.ref.setModel(applied)) noteAppliedModel(slot, applied);
+    const pawn = pawnOf(slot);
+    if (pawn === null || !pawn.isValid) return;
+    // Re-dealt (or the player cut) while the frame drained.
+    if (reg.roleOf(slot) !== role) return;
+    const index = pawn.ref.index;
+    // Skip only when THIS pawn is already wearing it. Keyed on the pawn, not the player: see
+    // `appliedModelPawn`. A redundant `setModel` re-stages a pawn every client holds, which is
+    // the raciest thing in the mode — worth an explicit test to avoid.
+    if (appliedModelPawnOf(slot) === index && appliedModelOf(slot) === want) return;
+    if (pawn.ref.setModel(want)) noteAppliedModel(slot, want, index);
   }, { slot });
 }
 

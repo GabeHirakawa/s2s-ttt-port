@@ -14,9 +14,10 @@
 
 import { Clients } from "@s2script/sdk/clients";
 import { Server } from "@s2script/sdk/server";
+import { ADMFLAG, Admin } from "@s2script/sdk/admin";
 import { RoleId } from "../core/enums";
 import { msg } from "../core/msgs";
-import { getTttHud } from "../cs2/ttthud";
+import { getTttHud, type LogRow } from "../cs2/ttthud";
 import * as reg from "../core/registry";
 
 /** How many entries a single round retains. Beyond this the oldest are dropped. */
@@ -205,6 +206,45 @@ function render(e: Entry): string {
   }
 }
 
+/**
+ * The colour a line carries. Only bad actions are tinted, and the split is by severity: a
+ * same-side KILL is the thing an admin is looking for, a same-side hit is a lead.
+ *
+ * Tone is decoration on TOP of the `[BAD]` marker `render` already writes, never a replacement for
+ * it. A client whose workshop addon predates the `.s2-li-*` rules gets no tint at all, so a log
+ * that said "bad" in colour alone would say nothing to them.
+ */
+function toneOf(e: Entry): LogRow["tone"] {
+  if (!e.bad) return undefined;
+  return e.kind === Kind.Death ? "bad" : "warn";
+}
+
+/** The log as toned rows, for the Panorama sheet. */
+export function makeLogRows(): LogRow[] {
+  const out: LogRow[] = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i]!;
+    out.push({ a: render(e), tone: toneOf(e) });
+  }
+  return out;
+}
+
+/**
+ * May this player read the round log? GENERIC, the same bar the admin commands use.
+ *
+ * The log names every role, every kill and every purchase of the round — reading it mid-round is a
+ * complete solution to the game. It was previously pushed to EVERY player at the round end, which
+ * handed the whole server the next round's read on anyone still holding a grudge. Restricted to
+ * admins, who need it to rule on RDM reports.
+ *
+ * Slot < 0 (the server console) is not a chat recipient and never reaches this — `printLogs`
+ * iterates connected clients — so there is no console default to pick here.
+ */
+function isLogAdmin(slot: number): boolean {
+  if (slot < 0) return false;
+  return Admin.forSlot(slot)?.hasFlags(ADMFLAG.GENERIC) === true;
+}
+
 /** Build the full log as lines (header + entries + footer). */
 export function makeLogs(): string[] {
   const out: string[] = [msg("GAME_LOGS_HEADER")];
@@ -213,19 +253,28 @@ export function makeLogs(): string[] {
   return out;
 }
 
-/** Print the log to every player's developer console, and once to the server console. */
+/**
+ * Show the round log to every ADMIN, and print it once to the server console.
+ *
+ * Admins only. See {@link isLogAdmin}: the log is a full solution to the round, so broadcasting it
+ * at the round end told everyone who had killed whom before the next round had even been dealt.
+ * The server-console copy stays unconditional — that is the operator's record, not a player-facing
+ * one.
+ */
 export function printLogs(): void {
   const lines = makeLogs();
+  const rows = makeLogRows();
   const active = reg.activeSlots();
   const ui = getTttHud();
   for (let i = 0; i < active.length; i++) {
     const slot = active[i]!;
     const client = Clients.fromSlot(slot);
     if (client === null || client.isBot) continue;
+    if (!isLogAdmin(slot)) continue;
     // Sheet first, console as the fallback — same rule as `!logs`. Only ONE pooled sheet is
     // available to this plugin at a time, so a player already reading something else keeps it and
     // gets the console dump instead of having it yanked away at the round end.
-    if (ui !== null && !ui.isShopOpen(slot) && !ui.isRdmOpen(slot) && ui.openLogs(slot, lines)) continue;
+    if (ui !== null && !ui.isShopOpen(slot) && !ui.isRdmOpen(slot) && ui.openLogs(slot, rows)) continue;
     for (let j = 0; j < lines.length; j++) client.print(lines[j]!);
   }
   for (let j = 0; j < lines.length; j++) console.log(lines[j]!);
@@ -246,7 +295,7 @@ export function printLogsTo(slot: number): void {
     for (let j = 0; j < lines.length; j++) console.log(lines[j]!);
     return;
   }
-  if (getTttHud()?.openLogs(slot, lines) === true) return;
+  if (getTttHud()?.openLogs(slot, makeLogRows()) === true) return;
   for (let j = 0; j < lines.length; j++) client.print(lines[j]!);
 }
 

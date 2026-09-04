@@ -18,6 +18,7 @@
  */
 
 import { cfg } from "../core/cvars";
+import { applyRoleModel } from "./icons";
 
 import { nextPreFrame } from "../core/preframe";
 import { Player, type MatchStats } from "@s2script/cs2";
@@ -900,4 +901,15 @@ export function onSpawn(slot: number): void {
   // Stripping here, and only here, resets the arsenal without touching the scavenging that follows:
   // the 15-second countdown and the whole round remain theirs to pick up from and KEEP.
   if (cfg.stripOnAssign) stripToSidearms(slot);
+
+  // Re-dress the pawn. THE spot for it: a spawn is the one moment the engine is guaranteed to have
+  // just chosen a model, and it chooses by TEAM — so every respawn silently replaces the role
+  // uniform with the team-default agent unless something puts it back.
+  //
+  // That is what made a revealed Innocent appear as a CT. `revealAsInnocent` moves them for the
+  // reveal, `switchTeam` respawns the pawn, and the model was only ever applied once at the deal.
+  // Hooking the spawn rather than each team-move call site catches every path at once — the reveal,
+  // the `jointeam` bounce, the round restart, an admin respawn — including the ones that respawn a
+  // pawn without changing a team at all.
+  applyRoleModel(slot);
 }
