@@ -69,6 +69,14 @@ export class TttHud {
   private readonly slayOverride = new Map<number, number>();
   /** Admin slot -> report id whose Ban button is armed and awaiting the confirming second press. */
   private readonly banArmed = new Map<number, number>();
+  /**
+   * Admin slot -> id of the report under their cursor at their last deliberate act (opening the
+   * sheet, picking a row, or ruling). The pending list is LIVE — it shrinks whenever any admin
+   * rules — so a cursor that never moved can have a different report slide under it. Convict and
+   * Acquit fire only while this pin still matches the selection, the same discipline
+   * {@link banStep} uses; on a mismatch the press re-pins and repaints instead of ruling.
+   */
+  private readonly rdmPin = new Map<number, number>();
   /** Last buy per slot, in game time — see {@link buySelected}. */
   private readonly lastBuyAt = new Map<number, number>();
 
@@ -76,13 +84,15 @@ export class TttHud {
   private readonly shopSpec: ModalSpec;
   private readonly rdmSpec: ModalSpec;
   private readonly logsSpec: ModalSpec;
-  /** The round log as rows, rebuilt on each open. */
-  private logRows: LogRow[] = [];
   /** Which archived round each admin is browsing (0 = most recent). */
   private readonly logAt = new Map<number, number>();
-  /** Round number and total page count describing whatever `logRows` currently holds. */
-  private logRound = 0;
-  private logTotal = 0;
+  /**
+   * The page each browser is looking at — rows plus the round number and total page count that
+   * describe them. Per-slot like `logAt`, because the sheet paints per-player: these used to be
+   * instance-level, so one admin stepping to an older round rewrote what every other open browser
+   * was reading.
+   */
+  private readonly logView = new Map<number, { rows: LogRow[]; round: number; count: number }>();
 
   /** Fired when an admin rules Guilty. Sanctioning lives in the plugin, not the UI. */
   onGuilty: ((steamId: string, name: string, slays: number, admin: string) => void) | null = null;
@@ -144,13 +154,14 @@ export class TttHud {
       title: "Round Log",
       subtitle: (slot) => {
         const at = this.logAt.get(slot) ?? 0;
-        const n = this.logRows.length;
-        return `round ${this.logRound} - ${n} entr${n === 1 ? "y" : "ies"}` +
-          (this.logTotal > 1 ? ` - ${at + 1}/${this.logTotal}` : "");
+        const view = this.logView.get(slot);
+        const n = view?.rows.length ?? 0;
+        return `round ${view?.round ?? 0} - ${n} entr${n === 1 ? "y" : "ies"}` +
+          ((view?.count ?? 1) > 1 ? ` - ${at + 1}/${view?.count}` : "");
       },
       pageSize: LOG_PAGE,
       width: "xl",
-      rows: () => this.logRows,
+      rows: (slot) => this.logView.get(slot)?.rows ?? [],
       // Rows are plain text: picking one selects it so a long line can be read in the detail box.
       onPick: (slot) => { this.logs?.refresh(slot); },
       detail: (slot, row) => (row === undefined ? [] : [row.a]),
@@ -169,10 +180,12 @@ export class TttHud {
       width: "lg",
       rows: () => this.rdmRows(),
       // Moving the cursor drops BOTH pieces of per-report scratch: a slay count typed for one
-      // report must not carry onto the next, and an armed ban must never survive the move.
-      onPick: (slot) => {
+      // report must not carry onto the next, and an armed ban must never survive the move. It
+      // also re-pins: a pick is the admin telling us which report they mean.
+      onPick: (slot, index) => {
         this.slayOverride.delete(slot);
         this.banArmed.delete(slot);
+        this.pinRdm(slot, pending()[index]?.id);
         this.rdm?.refresh(slot);
       },
       detail: (slot, row, cursor) => this.rdmDetail(slot, cursor),
@@ -356,12 +369,11 @@ export class TttHud {
     if (why !== null) return false;
     const modal = this.claimLogs();
     if (modal === null) return false;
+    const head = this.logPage?.(0);
     this.logAt.set(slot, 0);
-    this.logTotal = this.logPage?.(0).count ?? 1;
-    this.logRound = this.logPage?.(0).round ?? 0;
     // Rows arrive already toned: the logger decides what counts as a bad action, because that is a
     // rule of the mode and not a property of the sheet.
-    this.logRows = lines.slice();
+    this.logView.set(slot, { rows: lines.slice(), round: head?.round ?? 0, count: head?.count ?? 1 });
     this.ui.hideAll(slot);
     modal.open(slot);
     modal.select(slot, 0);
@@ -376,13 +388,12 @@ export class TttHud {
    */
   private stepLog(slot: number, delta: number): void {
     if (!this.logs?.isOpen(slot) || this.logPage === null) return;
-    const max = Math.max(0, this.logTotal - 1);
+    const count = this.logView.get(slot)?.count ?? 1;
+    const max = Math.max(0, count - 1);
     const at = Math.max(0, Math.min(max, (this.logAt.get(slot) ?? 0) + delta));
     const page = this.logPage(at);
     this.logAt.set(slot, at);
-    this.logRows = page.rows;
-    this.logRound = page.round;
-    this.logTotal = page.count;
+    this.logView.set(slot, { rows: page.rows, round: page.round, count: page.count });
     this.logs?.select(slot, 0);
     this.logs?.refresh(slot);
   }
@@ -400,9 +411,7 @@ export class TttHud {
     if (modal === null) return false;
     const page = this.logPage(0);
     this.logAt.set(slot, 0);
-    this.logRows = page.rows;
-    this.logRound = page.round;
-    this.logTotal = page.count;
+    this.logView.set(slot, { rows: page.rows, round: page.round, count: page.count });
     this.ui.hideAll(slot);
     modal.open(slot);
     modal.select(slot, 0);
@@ -434,6 +443,8 @@ export class TttHud {
     this.slayOverride.delete(slot);
     this.banArmed.delete(slot);
     rdm.open(slot);
+    // Pin whatever the open landed on, so the first Convict/Acquit press has an identity to check.
+    this.pinRdm(slot, this.selected(slot)?.id);
     // Server-side truth about what was drawn, matching the shop's line. "Nothing on screen" has two
     // very different causes — we painted nothing, or we painted and the layout did not show it —
     // and without this there is no way to tell them apart from a log.
@@ -446,7 +457,14 @@ export class TttHud {
     this.slayOverride.delete(slot);
     // An armed ban NEVER survives the sheet closing — reopening it must not fire on one press.
     this.banArmed.delete(slot);
+    this.rdmPin.delete(slot);
     this.rdm?.close(slot);
+  }
+
+  /** Record (or clear, when the queue is empty) which report `slot`'s next verdict may rule. */
+  private pinRdm(slot: number, id: number | undefined): void {
+    if (id === undefined) this.rdmPin.delete(slot);
+    else this.rdmPin.set(slot, id);
   }
 
   /**
@@ -552,15 +570,37 @@ export class TttHud {
     });
     this.log(`rdm #${sel.id}: ${sel.accusedName} BANNED by ${admin}` + (ruled ? "" : " (report already ruled)"));
     this.rdm?.select(slot, 0);
+    // Ruling moved this admin to the head of the queue by OUR hand, not theirs — re-pin so the
+    // repaint they are about to read is the report their next press rules.
+    this.pinRdm(slot, pending()[0]?.id);
     this.refreshRdm();
   }
 
   private verdict(slot: number, v: Verdict): void {
     if (!this.rdm?.isOpen(slot)) return;
-    const report = pending()[this.rdm.cursor(slot)];
-    if (!report) return;
+    const sel = this.selected(slot);
+    if (!sel) return;
+    // Identity check, exactly as {@link banStep}'s confirm press: rule only the report this admin
+    // pinned by opening or picking. Another admin ruling shrinks `pending()` and slides a NEW
+    // report under an unmoved cursor, so an unchecked press here convicted whoever happened to
+    // land there. On a mismatch the press re-pins and repaints — the admin rules on the next
+    // press, now looking at the report the verdict would actually hit.
+    if (this.rdmPin.get(slot) !== sel.id) {
+      this.pinRdm(slot, sel.id);
+      // The scratch belonged to whichever report slid away, same rule as a cursor move.
+      this.slayOverride.delete(slot);
+      this.banArmed.delete(slot);
+      this.ui.toast(slot, {
+        title: "Queue changed",
+        message: `Now selected: ${sel.reporterName} vs ${sel.accusedName} - press again to rule`,
+        variant: "warn",
+        holdSeconds: 5,
+      });
+      this.rdm?.refresh(slot);
+      return;
+    }
     const admin = Player.fromSlot(slot)?.playerName ?? `slot ${slot}`;
-    const ruled = rule(report.id, v, this.slaysFor(slot), admin);
+    const ruled = rule(sel.id, v, this.slaysFor(slot), admin);
     if (!ruled) return;
     // The scratch belonged to the report just ruled; the next one gets its own ladder reading.
     this.slayOverride.delete(slot);
@@ -580,6 +620,8 @@ export class TttHud {
     this.log(`rdm #${ruled.id}: ${ruled.reporterName} vs ${ruled.accusedName} -> ` +
       `${v === Verdict.Guilty ? `guilty (${ruled.slays} slays)` : "innocent"} by ${admin}`);
     this.rdm?.select(slot, 0);
+    // Same re-pin as banStep: the ruling itself moved this admin's cursor.
+    this.pinRdm(slot, pending()[0]?.id);
     this.refreshRdm();
   }
 
@@ -605,14 +647,18 @@ export class TttHud {
     }
     this.slayOverride.clear();
     this.banArmed.clear();
+    this.rdmPin.clear();
     this.logAt.clear();
+    this.logView.clear();
   }
 
   forget(slot: number): void {
     this.slayOverride.delete(slot);
     this.banArmed.delete(slot);
+    this.rdmPin.delete(slot);
     this.lastBuyAt.delete(slot);
     this.logAt.delete(slot);
+    this.logView.delete(slot);
     this.shop?.forget(slot);
     this.rdm?.forget(slot);
     this.logs?.forget(slot);
